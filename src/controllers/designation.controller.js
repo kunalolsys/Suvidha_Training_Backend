@@ -19,6 +19,13 @@ export const getDesignations = asyncHandler(async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, "Designations fetched successfully", data));
 });
+export const getAllDesignations = asyncHandler(async (req, res) => {
+  const data = await designationService.getAllDesignations();
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, "Designations fetched successfully", data));
+});
 
 export const getDesignationById = asyncHandler(async (req, res) => {
   const designation = await designationService.getDesignationById(

@@ -56,7 +56,17 @@ export const getStores = async ({ page = 1, limit = 10, search = "" }) => {
     totalPages: Math.ceil(total / limit),
   };
 };
+export const getAllStores = async () => {
+  const [stores, total] = await Promise.all([
+    Store.find().sort({ createdAt: -1 }),
+    Store.countDocuments(),
+  ]);
 
+  return {
+    stores,
+    total,
+  };
+};
 export const getStoreById = async (id) => {
   const store = await Store.findById(id);
 

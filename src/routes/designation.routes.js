@@ -18,6 +18,12 @@ router.get(
   authorize("Admin"),
   designationController.getDesignations,
 );
+router.get(
+  "/all",
+  protect,
+  authorize("Admin"),
+  designationController.getAllDesignations,
+);
 
 router.get(
   "/:id",

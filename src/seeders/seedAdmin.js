@@ -7,7 +7,7 @@ const seedAdminUser = async () => {
   try {
     const url = process.env.MONGO_URI;
     // 1. Connect to your MongoDB instance
-    console.log(url);
+    // console.log(url);
     await mongoose.connect(url);
     console.log("Database connected successfully for seeding...");
 
@@ -26,9 +26,9 @@ const seedAdminUser = async () => {
 
     // 4. Insert the master admin document
     const masterAdmin = await User.create({
-      employeeId: "MASTER_ADMIN",
-      name: process.env.ADMIN_USER_NAME || "System Administrator",
-      email: process.env.ADMIN_USER_EMAIL || "super@openlogicsys.com",
+      employeeId: process.env.ADMIN_ECODE || "Admin001",
+      name: process.env.ADMIN_USER_NAME || "Admin",
+      email: process.env.ADMIN_USER_EMAIL || "admin@openlogicsys.com",
       password: hashedPassword,
       role: "Admin",
       isActive: true,

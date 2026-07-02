@@ -1,3 +1,4 @@
+import Question from "../models/Question.js";
 import Video from "../models/Video.js";
 import ApiError from "../utils/ApiError.js";
 
@@ -59,13 +60,29 @@ export const getVideos = async ({
 
   return {
     videos,
-    total,
-    page: Number(page),
-    limit: Number(limit),
-    totalPages: Math.ceil(total / limit),
+    pagination: {
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      totalPages: Math.ceil(total / limit),
+    },
   };
 };
+export const getAllVideos = async () => {
+  const filter = {
+    isActive: true,
+  };
 
+  const [videos, total] = await Promise.all([
+    Video.find(filter).populate("designation").sort({ sortOrder: 1 }),
+
+    Video.countDocuments(filter),
+  ]);
+
+  return {
+    videos,
+  };
+};
 export const getVideoById = async (id) => {
   const video = await Video.findById(id).populate("designation");
 
@@ -102,7 +119,6 @@ export const updateVideo = async (id, body) => {
 
   return video.populate("designation");
 };
-
 export const deleteVideo = async (id) => {
   const video = await Video.findById(id);
 
@@ -110,9 +126,20 @@ export const deleteVideo = async (id) => {
     throw new ApiError(404, "Video not found");
   }
 
+  const questionExists = await Question.exists({ video: id });
+
+  if (questionExists) {
+    throw new ApiError(
+      409,
+      "Cannot delete video. One or more questions are linked to this video.",
+    );
+  }
+
   video.isActive = false;
 
   await video.save();
 
-  return null;
+  return {
+    message: "Video deleted successfully",
+  };
 };

@@ -14,7 +14,6 @@ export const createQuestion = async (body) => {
   const duplicateOrder = await Question.findOne({
     video,
     sortOrder,
-    isActive: true,
   });
 
   if (duplicateOrder) {
@@ -41,9 +40,7 @@ export const getQuestions = async ({
   search = "",
   video,
 }) => {
-  const filter = {
-    isActive: true,
-  };
+  const filter = {};
 
   if (video) {
     filter.video = video;
@@ -70,17 +67,19 @@ export const getQuestions = async ({
 
   return {
     questions,
-    total,
-    page: Number(page),
-    limit: Number(limit),
-    totalPages: Math.ceil(total / limit),
+    pagination: {
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      totalPages: Math.ceil(total / limit),
+    },
   };
 };
 
 export const getQuestionById = async (id) => {
   const question = await Question.findById(id).populate("video");
 
-  if (!question || !question.isActive) {
+  if (!question) {
     throw new ApiError(404, "Question not found");
   }
 
@@ -90,7 +89,7 @@ export const getQuestionById = async (id) => {
 export const updateQuestion = async (id, body) => {
   const question = await Question.findById(id);
 
-  if (!question || !question.isActive) {
+  if (!question) {
     throw new ApiError(404, "Question not found");
   }
 
@@ -107,7 +106,6 @@ export const updateQuestion = async (id, body) => {
       _id: { $ne: id },
       video: body.video || question.video,
       sortOrder: body.sortOrder,
-      isActive: true,
     });
 
     if (exists) {
@@ -123,15 +121,13 @@ export const updateQuestion = async (id, body) => {
 };
 
 export const deleteQuestion = async (id) => {
-  const question = await Question.findById(id);
+  const question = await Question.findByIdAndDelete(id);
 
-  if (!question || !question.isActive) {
+  if (!question) {
     throw new ApiError(404, "Question not found");
   }
 
-  question.isActive = false;
-
-  await question.save();
-
-  return null;
+  return {
+    message: "Question deleted successfully",
+  };
 };

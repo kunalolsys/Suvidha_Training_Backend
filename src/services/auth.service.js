@@ -35,22 +35,20 @@ export const register = async (body) => {
     user,
   };
 };
+export const login = async ({ userName }) => {
+  if (!userName) {
+    throw new ApiError(400, "Email or Employee ID is required");
+  }
 
-export const login = async ({ email, password }) => {
   const user = await User.findOne({
-    email: email.toLowerCase(),
+    $or: [{ email: userName.toLowerCase() }, { employeeId: userName }],
+    isActive: true,
   })
     .populate("designation")
     .populate("store");
 
   if (!user) {
-    throw new ApiError(401, "Invalid email or password");
-  }
-
-  const match = await bcrypt.compare(password, user.password);
-
-  if (!match) {
-    throw new ApiError(401, "Invalid email or password");
+    throw new ApiError(401, "Invalid Email or Employee ID");
   }
 
   const token = generateToken(user);
@@ -62,6 +60,33 @@ export const login = async ({ email, password }) => {
     user,
   };
 };
+
+// export const login = async ({ email, password }) => {
+//   const user = await User.findOne({
+//     email: email.toLowerCase(),
+//   })
+//     .populate("designation")
+//     .populate("store");
+
+//   if (!user) {
+//     throw new ApiError(401, "Invalid email or password");
+//   }
+
+//   const match = await bcrypt.compare(password, user.password);
+
+//   if (!match) {
+//     throw new ApiError(401, "Invalid email or password");
+//   }
+
+//   const token = generateToken(user);
+
+//   user.password = undefined;
+
+//   return {
+//     token,
+//     user,
+//   };
+// };
 
 export const profile = async (userId) => {
   const user = await User.findById(userId)

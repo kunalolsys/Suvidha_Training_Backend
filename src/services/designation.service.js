@@ -52,7 +52,17 @@ export const getDesignations = async ({
     totalPages: Math.ceil(total / limit),
   };
 };
+export const getAllDesignations = async () => {
+  const [designations, total] = await Promise.all([
+    Designation.find().sort({ name: 1 }),
+    Designation.countDocuments(),
+  ]);
 
+  return {
+    designations,
+    total,
+  };
+};
 export const getDesignationById = async (id) => {
   const designation = await Designation.findById(id);
 

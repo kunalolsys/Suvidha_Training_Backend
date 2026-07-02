@@ -18,6 +18,13 @@ export const getStores = asyncHandler(async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, "Stores fetched successfully", data));
 });
+export const getAllStores = asyncHandler(async (req, res) => {
+  const data = await storeService.getAllStores();
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, "Stores fetched successfully", data));
+});
 
 export const getStoreById = asyncHandler(async (req, res) => {
   const store = await storeService.getStoreById(req.params.id);
