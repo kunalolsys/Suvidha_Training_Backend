@@ -9,6 +9,8 @@ router.post("/", protect, authorize("Admin"), videoController.createVideo);
 
 router.get("/", protect, videoController.getVideos);
 
+router.get("/emp-videos", protect, videoController.getVideosForEmployee);
+
 router.get("/all", protect, videoController.getAllVideos);
 
 router.get("/:id", protect, videoController.getVideoById);

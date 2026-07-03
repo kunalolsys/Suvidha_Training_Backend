@@ -17,6 +17,13 @@ export const getQuestions = asyncHandler(async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, "Questions fetched successfully", questions));
 });
+export const getQuestionsPerVideo = asyncHandler(async (req, res) => {
+  const questions = await questionService.getQuestionsPerVideo(req.params.videoId);
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, "Questions fetched successfully", questions));
+});
 
 export const getQuestionById = asyncHandler(async (req, res) => {
   const question = await questionService.getQuestionById(req.params.id);

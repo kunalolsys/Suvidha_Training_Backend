@@ -17,6 +17,13 @@ export const getVideos = asyncHandler(async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, "Videos fetched successfully", videos));
 });
+export const getVideosForEmployee = asyncHandler(async (req, res) => {
+  const videos = await videoService.getVideosForEmployee(req.query);
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, "Videos fetched successfully", videos));
+});
 export const getAllVideos = asyncHandler(async (req, res) => {
   const videos = await videoService.getAllVideos();
 

@@ -6,6 +6,7 @@ import videoRoutes from "./video.routes.js";
 import questionsRoutes from "./question.routes.js";
 import reportRoutes from "./report.routes.js";
 import userRoutes from "./user.routes.js";
+import progressRoutes from "./progress.routes.js";
 
 const router = express.Router();
 router.use("/auth", authRoutes);
@@ -15,6 +16,7 @@ router.use("/videos", videoRoutes);
 router.use("/questions", questionsRoutes);
 router.use("/reports", reportRoutes);
 router.use("/users", userRoutes);
+router.use("/progress", progressRoutes);
 
 export default router;
 

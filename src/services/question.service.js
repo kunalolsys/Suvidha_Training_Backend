@@ -131,3 +131,19 @@ export const deleteQuestion = async (id) => {
     message: "Question deleted successfully",
   };
 };
+export const getQuestionsPerVideo = async (videoId) => {
+  const filter = {};
+
+  if (videoId) {
+    filter.video = videoId;
+  }
+
+  const [questions, total] = await Promise.all([
+    Question.find(filter).populate("video").sort({ sortOrder: 1 }),
+    Question.countDocuments(filter),
+  ]);
+
+  return {
+    questions,
+  };
+};

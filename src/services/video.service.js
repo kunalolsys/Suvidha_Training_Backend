@@ -68,6 +68,25 @@ export const getVideos = async ({
     },
   };
 };
+export const getVideosForEmployee = async ({ designation }) => {
+  const filter = {
+    isActive: true,
+  };
+
+  if (designation) {
+    filter.designation = designation;
+  }
+
+  const [videos, total] = await Promise.all([
+    Video.find(filter).populate("designation").sort({ sortOrder: 1 }),
+
+    Video.countDocuments(filter),
+  ]);
+
+  return {
+    videos,
+  };
+};
 export const getAllVideos = async () => {
   const filter = {
     isActive: true,
@@ -89,8 +108,9 @@ export const getVideoById = async (id) => {
   if (!video || !video.isActive) {
     throw new ApiError(404, "Video not found");
   }
-
-  return video;
+  return {
+    video,
+  };
 };
 
 export const updateVideo = async (id, body) => {

@@ -13,6 +13,7 @@ router.post(
 );
 
 router.get("/", protect, questionController.getQuestions);
+router.get("/:videoId", protect, questionController.getQuestionsPerVideo);
 
 router.get("/:id", protect, questionController.getQuestionById);
 
