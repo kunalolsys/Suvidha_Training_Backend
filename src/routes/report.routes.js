@@ -1,66 +1,18 @@
-import express from "express";
-
+import { Router } from "express";
 import * as reportController from "../controllers/report.controller.js";
 
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
+const router = Router();
 
-const router = express.Router();
+router.use(protect, authorize("Admin"));
 
-router.get(
-  "/dashboard",
-  protect,
-  authorize("Admin"),
-  reportController.getDashboard,
-);
-
-router.get(
-  "/employees",
-  protect,
-  authorize("Admin"),
-  reportController.getEmployees,
-);
-router.get(
-  "/employees/:id",
-  protect,
-  authorize("Admin"),
-  reportController.getEmployeeById,
-);
-
-router.get("/stores", protect, authorize("Admin"), reportController.getStores);
-router.get(
-  "/designations",
-  protect,
-  authorize("Admin"),
-  reportController.getDesignations,
-);
-
-router.get("/videos", protect, authorize("Admin"), reportController.getVideos);
-router.get(
-  "/top-performers",
-  protect,
-  authorize("Admin"),
-  reportController.getTopPerformers,
-);
-
-router.get(
-  "/failed",
-  protect,
-  authorize("Admin"),
-  reportController.getFailedEmployees,
-);
-router.get(
-  "/activity",
-  protect,
-  authorize("Admin"),
-  reportController.getActivity,
-);
-
-router.get(
-  "/export",
-  protect,
-  authorize("Admin"),
-  reportController.exportReport,
-);
+// GET /api/reports?period=30|90|all   ← full page in one shot
+router.get("/", reportController.getFullReport);
+router.get("/stats", reportController.getReportStats);
+router.get("/by-designation", reportController.getBreakdownByDesignation);
+router.get("/by-store", reportController.getBreakdownByStore);
+router.get("/at-risk", reportController.getAtRiskEmployees);
+router.get("/top-performers", reportController.getTopPerformers);
 
 export default router;

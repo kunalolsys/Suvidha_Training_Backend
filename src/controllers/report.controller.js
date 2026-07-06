@@ -1,112 +1,75 @@
-import asyncHandler from "../middleware/asyncHandler.js";
-import ApiResponse from "../utils/ApiResponse.js";
-import ApiError from "../utils/ApiError.js";
+import * as svc from "../services/report.service.js";
 
-import * as reportService from "../services/report.service.js";
+const getPeriod = (req) => req.query.period || "all"; // "30" | "90" | "all"
 
-const getPagination = (req) => {
-  const page = req.query.page ? Number(req.query.page) : 1;
-  const limit = req.query.limit ? Number(req.query.limit) : 10;
-  if (!Number.isFinite(page) || page < 1)
-    throw new ApiError(400, "Invalid page");
-  if (!Number.isFinite(limit) || limit < 1 || limit > 500) {
-    throw new ApiError(400, "Invalid limit");
+export const getReportStats = async (req, res) => {
+  try {
+    const data = await svc.getReportStats(getPeriod(req));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("[getReportStats]", err);
+    res.status(500).json({ success: false, message: err.message });
   }
-  return { page, limit };
 };
 
-export const getDashboard = asyncHandler(async (req, res) => {
-  const data = await reportService.getDashboard();
-  return res.status(200).json(new ApiResponse(200, "Dashboard fetched", data));
-});
+export const getBreakdownByDesignation = async (req, res) => {
+  try {
+    const data = await svc.getBreakdownByDesignation(getPeriod(req));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("[getBreakdownByDesignation]", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
-export const getEmployees = asyncHandler(async (req, res) => {
-  const { page, limit } = getPagination(req);
+export const getBreakdownByStore = async (req, res) => {
+  try {
+    const data = await svc.getBreakdownByStore(getPeriod(req));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("[getBreakdownByStore]", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
-  const data = await reportService.getEmployeesReport({
-    page,
-    limit,
-    search: req.query.search,
-    designation: req.query.designation,
-    store: req.query.store,
-    status: req.query.status,
-  });
+export const getAtRiskEmployees = async (req, res) => {
+  try {
+    const data = await svc.getAtRiskEmployees(getPeriod(req));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("[getAtRiskEmployees]", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Employees report fetched", data));
-});
+export const getTopPerformers = async (req, res) => {
+  try {
+    const data = await svc.getTopPerformers(getPeriod(req));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("[getTopPerformers]", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
-export const getEmployeeById = asyncHandler(async (req, res) => {
-  const data = await reportService.getEmployeeDetails(req.params.id);
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Employee details fetched", data));
-});
-
-export const getStores = asyncHandler(async (req, res) => {
-  const data = await reportService.getStoresReport();
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Stores report fetched", data));
-});
-
-export const getDesignations = asyncHandler(async (req, res) => {
-  const data = await reportService.getDesignationsReport();
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Designations report fetched", data));
-});
-
-export const getVideos = asyncHandler(async (req, res) => {
-  const { page, limit } = getPagination(req);
-
-  const data = await reportService.getVideosAnalytics({
-    page,
-    limit,
-    search: req.query.search,
-    designation: req.query.designation,
-    status: req.query.status,
-  });
-
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Videos analytics fetched", data));
-});
-
-export const getTopPerformers = asyncHandler(async (req, res) => {
-  const data = await reportService.getTopPerformers();
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Top performers fetched", data));
-});
-
-export const getFailedEmployees = asyncHandler(async (req, res) => {
-  const data = await reportService.getFailedEmployees();
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Failed employees fetched", data));
-});
-
-export const getActivity = asyncHandler(async (req, res) => {
-  const data = await reportService.getRecentActivity();
-  return res
-    .status(200)
-    .json(new ApiResponse(200, "Recent activity fetched", data));
-});
-
-export const exportReport = asyncHandler(async (req, res) => {
-  const { search, designation, store, status } = req.query;
-
-  const buffer = await reportService.exportReport({
-    filters: { search, designation, store, status },
-  });
-
-  res.setHeader(
-    "Content-Type",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  );
-  res.setHeader("Content-Disposition", `attachment; filename=report.xlsx`);
-
-  return res.status(200).send(buffer);
-});
+// Full page in one round-trip
+export const getFullReport = async (req, res) => {
+  try {
+    const period = getPeriod(req);
+    const [stats, byDesignation, byStore, atRisk, topPerformers] =
+      await Promise.all([
+        svc.getReportStats(period),
+        svc.getBreakdownByDesignation(period),
+        svc.getBreakdownByStore(period),
+        svc.getAtRiskEmployees(period),
+        svc.getTopPerformers(period),
+      ]);
+    res.json({
+      success: true,
+      data: { stats, byDesignation, byStore, atRisk, topPerformers },
+    });
+  } catch (err) {
+    console.error("[getFullReport]", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};

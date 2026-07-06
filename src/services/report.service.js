@@ -1,1324 +1,522 @@
-import mongoose from "mongoose";
-import * as exceljs from "exceljs";
-
-import Progress from "../models/Progress.js";
 import User from "../models/User.js";
 import Video from "../models/Video.js";
-import Question from "../models/Question.js";
+import Progress from "../models/Progress.js";
+import Designation from "../models/Designation.js";
+import Store from "../models/Store.js";
 
-const toNumber = (v, fallback) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+// ── Date filter helper ────────────────────────────────────────────────────
+const dateFilter = (period) => {
+  if (!period || period === "all") return {};
+  const days = Number(period);
+  if (!days) return {};
+  const from = new Date();
+  from.setDate(from.getDate() - days);
+  return { createdAt: { $gte: from } };
 };
 
-const buildSearchMatch = ({ field, search }) => {
-  if (!search) return {};
-  return {
-    [field]: { $regex: search, $options: "i" },
-  };
-};
+// ─────────────────────────────────────────────────────────────────────────
+// 1. TOP STATS  (5 KPI cards on Reports page)
+// ─────────────────────────────────────────────────────────────────────────
+export const getReportStats = async (period = "all") => {
+  const df = dateFilter(period);
 
-const parseCommaList = (v) => {
-  if (!v) return [];
-  if (Array.isArray(v)) return v;
-  return String(v)
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-};
-
-const buildEmployeeTrainingStatusFilter = ({ status }) => {
-  if (!status) return {};
-
-  // status values (expected): not_started | in_progress | completed
-  switch (status) {
-    case "completed":
-      return { completedVideosCount: { $gt: 0 }, isTrainingCompleted: true };
-    case "in_progress":
-      return { completedVideosCount: { $gt: 0 }, isTrainingCompleted: false };
-    case "not_started":
-      return { completedVideosCount: 0, anyProgressExists: true };
-    default:
-      return {};
-  }
-};
-
-// Base building blocks
-const baseProgresAgg = () => [
-  {
-    $lookup: {
-      from: "users",
-      localField: "employee",
-      foreignField: "_id",
-      as: "employeeObj",
-    },
-  },
-  { $unwind: { path: "$employeeObj", preserveNullAndEmptyArrays: false } },
-  {
-    $lookup: {
-      from: "videos",
-      localField: "video",
-      foreignField: "_id",
-      as: "videoObj",
-    },
-  },
-  { $unwind: { path: "$videoObj", preserveNullAndEmptyArrays: false } },
-  {
-    $lookup: {
-      from: "designations",
-      localField: "employeeObj.designation",
-      foreignField: "_id",
-      as: "designationObj",
-    },
-  },
-  {
-    $unwind: {
-      path: "$designationObj",
-      preserveNullAndEmptyArrays: true,
-    },
-  },
-  {
-    $lookup: {
-      from: "stores",
-      localField: "employeeObj.store",
-      foreignField: "_id",
-      as: "storeObj",
-    },
-  },
-  {
-    $unwind: {
-      path: "$storeObj",
-      preserveNullAndEmptyArrays: true,
-    },
-  },
-  {
-    $lookup: {
-      from: "videos",
-      localField: "videoObj.designation",
-      foreignField: "_id",
-      as: "videoDesignationObj",
-    },
-  },
-  {
-    $unwind: {
-      path: "$videoDesignationObj",
-      preserveNullAndEmptyArrays: true,
-    },
-  },
-  {
-    $project: {
-      employee: "$employeeObj._id",
-      employeeName: "$employeeObj.name",
-      employeeEmail: "$employeeObj.email",
-      employeeEmployeeId: "$employeeObj.employeeId",
-      employeeRole: "$employeeObj.role",
-      employeeDesignationId: "$employeeObj.designation",
-      employeeStoreId: "$employeeObj.store",
-      employeeDesignationTitle: "$designationObj.title",
-      employeeStoreName: "$storeObj.name",
-
-      video: "$videoObj._id",
-      videoTitle: "$videoObj.title",
-      videoDesignationId: "$videoObj.designation",
-      videoSortOrder: "$videoObj.sortOrder",
-      videoIsActive: "$videoObj.isActive",
-
-      progressStatus: "$status",
-      attempts: "$attempts",
-      completedAt: "$completedAt",
-      history: "$history",
-    },
-  },
-];
-
-export const getDashboard = async () => {
-  // Dashboard metrics across all Admin/Employee.
-  // Use a single aggregation on Progress for training/completion metrics.
-
-  const pipeline = [
-    ...baseProgresAgg(),
-    {
-      $match: {
-        employeeRole: "Employee",
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        completedVideosCount: {
-          $sum: { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0] },
-        },
-        totalVideosInProgressScope: { $sum: 1 },
-
-        completedEmployeesSet: { $addToSet: "$employee" },
-
-        employeeHistory: {
-          $push: {
-            employee: "$employee",
-            status: "$progressStatus",
-            completedAt: "$completedAt",
-            attempts: "$attempts",
-            history: "$history",
-          },
-        },
-
-        totalAttempts: {
-          $sum: "$attempts",
-        },
-        averageScoreSum: {
-          $sum: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.score", -1] },
-              0,
-            ],
-          },
-        },
-        completedVideoCountForAvgScore: {
-          $sum: {
-            $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-          },
-        },
-      },
-    },
-    {
-      $addFields: {
-        completionPercentage: {
-          $cond: [
-            { $eq: ["$totalVideosInProgressScope", 0] },
-            0,
-            {
-              $multiply: [
-                {
-                  $divide: [
-                    "$completedVideosCount",
-                    "$totalVideosInProgressScope",
-                  ],
-                },
-                100,
-              ],
-            },
-          ],
-        },
-        averageScore: {
-          $cond: [
-            { $eq: ["$completedVideoCountForAvgScore", 0] },
-            0,
-            {
-              $divide: ["$averageScoreSum", "$completedVideoCountForAvgScore"],
-            },
-          ],
-        },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        completedVideosCount: 1,
-        totalVideosInProgressScope: 1,
-        completionPercentage: 1,
-        averageScore: 1,
-        totalAttempts: 1,
-      },
-    },
-  ];
-
-  const [dashboardAgg] = await Promise.all([
-    Progress.aggregate(pipeline),
+  // 1. Fetch total employees and cross-reference total active videos per designation concurrently
+  const [totalEmployees, videoCountByDesignation] = await Promise.all([
     User.countDocuments({ role: "Employee", isActive: true }),
-    User.countDocuments({ role: "Admin", isActive: true }),
-    Video.countDocuments({ isActive: true }),
-    // Total designations and stores are derived from their models
+    Video.aggregate([
+      { $match: { isActive: true } },
+      { $group: { _id: "$designation", count: { $sum: 1 } } },
+    ]),
   ]);
 
-  const completedVideosCount = dashboardAgg?.[0]?.completedVideosCount || 0;
-  const totalVideosInProgressScope =
-    dashboardAgg?.[0]?.totalVideosInProgressScope || 0;
-  const completionPercentage = dashboardAgg?.[0]?.completionPercentage || 0;
-  const averageScore = dashboardAgg?.[0]?.averageScore || 0;
-  const totalAttempts = dashboardAgg?.[0]?.totalAttempts || 0;
+  // Convert designation video counts into a flat HashMap lookup object for O(1) complexity matching
+  const videoCountMap = videoCountByDesignation.reduce((acc, curr) => {
+    acc[curr._id.toString()] = curr.count;
+    return acc;
+  }, {});
 
-  // Total stores/designations and completed employees need additional quick queries.
-  // Keep these as parallel queries to avoid heavy cross joins.
-  const [
-    totalDesignations,
-    totalQuestions,
-    totalStores,
-    completedEmployeesCount,
-    employeeNotStartedCount,
-    employeeInProgressCount,
-    completedEmployeesAvg,
-  ] = await Promise.all([
-    (await import("../models/Designation.js")).default.countDocuments({}),
-    (await import("../models/Question.js")).default.countDocuments({}),
-    (await import("../models/Store.js")).default.countDocuments({}),
-    // Completed employees: all their employee progress entries across all videos are completed.
-    // Derive by checking per-employee completion ratio in aggregation.
-    (async () => {
-      const res = await Progress.aggregate([
-        ...baseProgresAgg(),
-        { $match: { employeeRole: "Employee" } },
-        {
-          $group: {
-            _id: "$employee",
-            totalEntries: { $sum: 1 },
-            completedEntries: {
-              $sum: {
-                $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-              },
-            },
-          },
-        },
-        {
-          $addFields: {
-            isEmployeeCompletedTraining: {
-              $cond: [
-                { $gt: ["$totalEntries", 0] },
-                { $eq: ["$completedEntries", "$totalEntries"] },
-                false,
-              ],
-            },
-          },
-        },
-        {
-          $match: { isEmployeeCompletedTraining: true },
-        },
-        { $count: "count" },
-      ]);
-      return res?.[0]?.count || 0;
-    })(),
-    (async () => {
-      const res = await Progress.aggregate([
-        ...baseProgresAgg(),
-        { $match: { employeeRole: "Employee" } },
-        {
-          $group: {
-            _id: "$employee",
-            completedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-              },
-            },
-            anyHistoryCount: {
-              $sum: { $cond: [{ $gt: [{ $size: "$history" }, 0] }, 1, 0] },
-            },
-            anyProgressEntry: { $sum: 1 },
-          },
-        },
-        {
-          $match: {
-            anyProgressEntry: { $gt: 0 },
-            completedCount: 0,
-          },
-        },
-        { $count: "count" },
-      ]);
-      return res?.[0]?.count || 0;
-    })(),
-    (async () => {
-      const res = await Progress.aggregate([
-        ...baseProgresAgg(),
-        { $match: { employeeRole: "Employee" } },
-        {
-          $group: {
-            _id: "$employee",
-            totalEntries: { $sum: 1 },
-            completedEntries: {
-              $sum: {
-                $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-              },
-            },
-          },
-        },
-        {
-          $match: {
-            totalEntries: { $gt: 0 },
-            completedEntries: { $gt: 0 },
-          },
-        },
-        // Exclude fully completed employees
-        {
-          $match: {
-            $expr: { $lt: ["$completedEntries", "$totalEntries"] },
-          },
-        },
-        { $count: "count" },
-      ]);
-      return res?.[0]?.count || 0;
-    })(),
-    0,
-  ]);
-
-  return {
-    totalEmployees: dashboardAgg
-      ? await User.countDocuments({ role: "Employee" })
-      : 0,
-    totalQuestions,
-    totalStores,
-    totalDesignations,
-    totalVideos: await Video.countDocuments({ isActive: true }),
-    completedVideos: completedVideosCount,
-    completedEmployees: completedEmployeesCount,
-    averageScore,
-    completionPercentage,
-    totalAttempts,
-    employeesInProgress: employeeInProgressCount,
-    employeesNotStarted: employeeNotStartedCount,
-  };
-};
-
-export const getEmployeesReport = async ({
-  page,
-  limit,
-  search,
-  designation,
-  store,
-  status,
-}) => {
-  const p = toNumber(page, 1);
-  const l = toNumber(limit, 10);
-  const skip = (p - 1) * l;
-
-  const employeeSearchMatch = search
-    ? {
-        $or: [
-          { employeeName: { $regex: search, $options: "i" } },
-          { employeeEmail: { $regex: search, $options: "i" } },
-          { employeeEmployeeId: { $regex: search, $options: "i" } },
-        ],
-      }
-    : {};
-
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-
-    // Filters applied after lookup projection
-    {
-      $match: {
-        ...employeeSearchMatch,
-        ...(designation
-          ? { employeeDesignationId: new mongoose.Types.ObjectId(designation) }
-          : {}),
-        ...(store
-          ? { employeeStoreId: new mongoose.Types.ObjectId(store) }
-          : {}),
-      },
-    },
-
-    // derive per-employee training summary
-    {
-      $group: {
-        _id: "$employee",
-        employeeId: { $first: "$employeeEmployeeId" },
-        employeeName: { $first: "$employeeName" },
-        employeeEmail: { $first: "$employeeEmail" },
-        storeId: { $first: "$employeeStoreId" },
-        storeName: { $first: "$employeeStoreName" },
-        designationId: { $first: "$employeeDesignationId" },
-        designationTitle: { $first: "$employeeDesignationTitle" },
-
-        totalVideosAttemptedOrAssigned: { $sum: 1 },
-        completedVideosCount: {
-          $sum: { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0] },
-        },
-        attempts: { $sum: "$attempts" },
-        lastActivityAt: { $max: "$completedAt" },
-        lastAttemptAt: {
-          $max: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.attemptedAt", -1] },
-              "$completedAt",
-            ],
-          },
-        },
-
-        sumLatestScores: {
-          $sum: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.score", -1] },
-              0,
-            ],
-          },
-        },
-        completedVideoCountForAvgScore: {
-          $sum: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 1] },
-              0,
-            ],
-          },
-        },
-
-        anyProgressExists: { $sum: 1 },
-        isTrainingCompleted: {
-          $min: {
-            $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-          },
-        },
-      },
-    },
-    {
-      $addFields: {
-        completionPercentage: {
-          $cond: [
-            { $eq: ["$totalVideosAttemptedOrAssigned", 0] },
-            0,
-            {
-              $multiply: [
-                {
-                  $divide: [
-                    "$completedVideosCount",
-                    "$totalVideosAttemptedOrAssigned",
-                  ],
-                },
-                100,
-              ],
-            },
-          ],
-        },
-        averageScore: {
-          $cond: [
-            { $eq: ["$completedVideosCount", 0] },
-            0,
-            { $divide: ["$sumLatestScores", "$completedVideosCount"] },
-          ],
-        },
-        // training completion boolean derived: isTrainingCompleted is 1 if all entries are completed.
-        isTrainingCompleted: { $eq: ["$isTrainingCompleted", 1] },
-      },
-    },
-
-    // Filter by derived status
-    {
-      $match: {
-        ...(status ? buildEmployeeTrainingStatusFilter({ status }) : {}),
-      },
-    },
-
-    { $sort: { lastActivityAt: -1, employeeName: 1 } },
-
+  // 2. Execute complex grouping metrics in a single MongoDB aggregation pipeline
+  const statsAggregation = await Progress.aggregate([
     {
       $facet: {
-        docs: [
-          { $skip: skip },
-          { $limit: l },
+        // Core Metric Aggregations (Overall Completion, First-Try Pass Rate, Total Attempts)
+        mainMetrics: [
+          { $match: df },
           {
-            $project: {
-              _id: 0,
-              employee: {
-                id: "$_id",
-                employeeId: "$employeeId",
-                name: "$employeeName",
-                email: "$employeeEmail",
+            $group: {
+              _id: null,
+              completedCount: {
+                $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
               },
-              store: { id: "$storeId", name: "$storeName" },
-              designation: { id: "$designationId", title: "$designationTitle" },
-              completedVideos: "$completedVideosCount",
-              totalVideos: "$totalVideosAttemptedOrAssigned",
-              completionPercentage: { $round: ["$completionPercentage", 2] },
-              averageScore: { $round: ["$averageScore", 2] },
-              attempts: "$attempts",
-              lastActivityAt: 1,
-              currentStatus: {
+              totalAttempts: { $sum: "$attempts" },
+              // Calculations for first try metrics
+              firstTryTotal: {
+                $sum: {
+                  $cond: [
+                    { $gt: [{ $size: { $ifNull: ["$history", []] } }, 0] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+              firstTryPassed: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $gt: [{ $size: { $ifNull: ["$history", []] } }, 0] },
+                        {
+                          $eq: [{ $arrayElemAt: ["$history.passed", 0] }, true],
+                        },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ],
+
+        // Metric calculations grouped by Employee (Employees at 100% and Need Attention)
+        employeeMetrics: [
+          {
+            $group: {
+              _id: "$employee",
+              completedCount: {
+                $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+              },
+              totalAttempts: { $sum: "$attempts" },
+              hasAnyPass: {
+                $max: {
+                  $cond: [
+                    {
+                      $gt: [
+                        {
+                          $size: {
+                            $filter: {
+                              input: { $ifNull: ["$history", []] },
+                              as: "h",
+                              cond: { $eq: ["$$h.passed", true] },
+                            },
+                          },
+                        },
+                        0,
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  ]);
+
+  // Extract result maps safely out of the aggregation pipeline facets
+  const main = statsAggregation[0]?.mainMetrics[0] || {
+    completedCount: 0,
+    totalAttempts: 0,
+    firstTryTotal: 0,
+    firstTryPassed: 0,
+  };
+  const employeeRecords = statsAggregation[0]?.employeeMetrics || [];
+
+  // 3. Optimized in-memory calculations for loop dependencies
+  // Stream users to map out totalPossible and check 100% completions using our precalculated HashMap
+  const allEmployees = await User.find(
+    { role: "Employee", isActive: true },
+    { designation: 1 },
+  ).lean();
+
+  let totalPossible = 0;
+  let atHundredPct = 0;
+
+  // Build an in-memory lookup map of completed counts by employee ID for O(1) performance lookup
+  const employeeCompletedMap = employeeRecords.reduce((acc, curr) => {
+    acc[curr._id.toString()] = {
+      completedCount: curr.completedCount,
+      totalAttempts: curr.totalAttempts,
+      hasAnyPass: curr.hasAnyPass,
+    };
+    return acc;
+  }, {});
+
+  for (const emp of allEmployees) {
+    const empDesignationId = emp.designation?.toString();
+    const assignedVideoCount = videoCountMap[empDesignationId] || 0;
+
+    totalPossible += assignedVideoCount;
+
+    const progressData = employeeCompletedMap[emp._id.toString()] || {
+      completedCount: 0,
+    };
+    if (
+      assignedVideoCount > 0 &&
+      progressData.completedCount >= assignedVideoCount
+    ) {
+      atHundredPct++;
+    }
+  }
+
+  // 4. Calculate Need Attention completely in-memory
+  const needAttention = employeeRecords.filter(
+    (rec) => rec.totalAttempts > 0 && rec.hasAnyPass === 0,
+  ).length;
+
+  // Final mathematical processing rules
+  const overallCompletion =
+    totalPossible > 0
+      ? Math.round((main.completedCount / totalPossible) * 100)
+      : 0;
+  const firstTryPassRate =
+    main.firstTryTotal > 0
+      ? Math.round((main.firstTryPassed / main.firstTryTotal) * 100)
+      : 0;
+
+  return {
+    overallCompletion: `${overallCompletion}%`,
+    employeesAt100: `${atHundredPct}/${totalEmployees}`,
+    firstTryPassRate: `${firstTryPassRate}%`,
+    totalQuizAttempts: main.totalAttempts,
+    needAttention,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2. BREAKDOWN BY DESIGNATION
+// ─────────────────────────────────────────────────────────────────────────
+export const getBreakdownByDesignation = async (period = "all") => {
+  const df = dateFilter(period);
+  const desigs = await Designation.find().lean();
+  const allStores = await Store.find().lean();
+
+  const rows = await Promise.all(
+    desigs.map(async (des) => {
+      const employees = await User.find(
+        { designation: des._id, role: "Employee", isActive: true },
+        { _id: 1, store: 1, name: 1 },
+      ).lean();
+
+      const empIds = employees.map((e) => e._id);
+      const empCount = empIds.length;
+
+      const assignedVideos = await Video.countDocuments({
+        designation: des._id,
+        isActive: true,
+      });
+      const totalPossible = empCount * assignedVideos;
+
+      const completedCount = await Progress.countDocuments({
+        employee: { $in: empIds },
+        status: "completed",
+        ...df,
+      });
+      const completionPct =
+        totalPossible > 0
+          ? Math.round((completedCount / totalPossible) * 100)
+          : 0;
+
+      // Best store: highest completion % among stores that have employees in this designation
+      const storeMap = {};
+      for (const emp of employees) {
+        const sid = String(emp.store);
+        if (!storeMap[sid]) storeMap[sid] = [];
+        storeMap[sid].push(emp._id);
+      }
+
+      let bestStore = "—",
+        bestStorePct = 0;
+      for (const [storeId, storeEmpIds] of Object.entries(storeMap)) {
+        const sc = await Progress.countDocuments({
+          employee: { $in: storeEmpIds },
+          status: "completed",
+          ...df,
+        });
+        const possible = storeEmpIds.length * assignedVideos;
+        const pct = possible > 0 ? Math.round((sc / possible) * 100) : 0;
+        if (pct >= bestStorePct) {
+          bestStorePct = pct;
+          const storeDoc = allStores.find((s) => String(s._id) === storeId);
+          bestStore = storeDoc?.name || "—";
+        }
+      }
+
+      // At-risk: employees in this designation who attempted but never passed
+      const atRiskAgg = await Progress.aggregate([
+        { $match: { employee: { $in: empIds }, attempts: { $gt: 0 }, ...df } },
+        {
+          $group: {
+            _id: "$employee",
+            anyPass: {
+              $max: {
                 $cond: [
-                  "$isTrainingCompleted",
-                  "completed",
                   {
-                    $cond: [
-                      { $gt: ["$completedVideosCount", 0] },
-                      "in_progress",
-                      "not_started",
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: "$history",
+                            as: "h",
+                            cond: "$$h.passed",
+                          },
+                        },
+                      },
+                      0,
                     ],
                   },
+                  1,
+                  0,
                 ],
               },
             },
           },
-        ],
-        totalCount: [{ $count: "count" }],
-      },
-    },
-  ];
+        },
+        { $match: { anyPass: 0 } },
+        { $count: "count" },
+      ]);
+      const atRisk = atRiskAgg[0]?.count || 0;
 
-  const [res] = await Progress.aggregate(pipeline);
-  const docs = res?.docs || [];
-  const total = res?.totalCount?.[0]?.count || 0;
-
-  return {
-    employees: docs,
-    total,
-    page: p,
-    limit: l,
-    totalPages: Math.ceil(total / l) || 1,
-  };
-};
-
-export const getEmployeeDetails = async (id) => {
-  const employeeId = new mongoose.Types.ObjectId(id);
-
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee", employee: employeeId } },
-    {
-      $group: {
-        _id: "$employee",
-        employee: {
-          $first: {
-            id: "$employee",
-            employeeId: "$employeeEmployeeId",
-            name: "$employeeName",
-            email: "$employeeEmail",
-          },
-        },
-        store: {
-          $first: { id: "$employeeStoreId", name: "$employeeStoreName" },
-        },
-        designation: {
-          $first: {
-            id: "$employeeDesignationId",
-            title: "$employeeDesignationTitle",
-          },
-        },
-        completedAt: { $max: "$completedAt" },
-        videos: {
-          $push: {
-            videoId: "$video",
-            title: "$videoTitle",
-            status: "$progressStatus",
-            completedAt: "$completedAt",
-            attempts: "$attempts",
-            history: "$history",
-            videoSortOrder: "$videoSortOrder",
-          },
-        },
-      },
-    },
-    {
-      $addFields: {
-        videos: {
-          $sortArray: { input: "$videos", sortBy: { videoSortOrder: 1 } },
-        },
-      },
-    },
-    {
-      $addFields: {
-        history: {
-          $reduce: {
-            input: "$videos",
-            initialValue: [],
-            in: {
-              $concatArrays: ["$$value", "$$this.history"],
-            },
-          },
-        },
-        completedVideos: {
-          $filter: {
-            input: "$videos",
-            as: "v",
-            cond: { $eq: ["$$v.status", "completed"] },
-          },
-        },
-        currentLockedVideo: {
-          $first: {
-            $filter: {
-              input: "$videos",
-              as: "v",
-              cond: { $eq: ["$$v.status", "locked"] },
-            },
-          },
-        },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        employee: 1,
-        store: 1,
-        designation: 1,
-        completionDate: "$completedAt",
-        currentLockedVideo: {
-          $cond: [
-            { $ifNull: ["$currentLockedVideo", false] },
-            {
-              videoId: "$currentLockedVideo.videoId",
-              title: "$currentLockedVideo.title",
-              sortOrder: "$currentLockedVideo.videoSortOrder",
-            },
-            null,
-          ],
-        },
-        videos: {
-          $map: {
-            input: "$videos",
-            as: "v",
-            in: {
-              videoId: "$$v.videoId",
-              title: "$$v.title",
-              status: "$$v.status",
-              completedAt: "$$v.completedAt",
-              attempts: "$$v.attempts",
-              history: "$$v.history",
-            },
-          },
-        },
-        quizAttempts: "$history",
-      },
-    },
-  ];
-
-  const [data] = await Progress.aggregate(pipeline);
-  if (!data) throw new Error("Employee not found");
-
-  return data;
-};
-
-export const getStoresReport = async () => {
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    {
-      $group: {
-        _id: "$employeeStoreId",
-        storeName: { $first: "$employeeStoreName" },
-        employeesCount: { $addToSet: "$employee" },
-        // completed employees: fully completed across all entries for that employee
-      },
-    },
-    {
-      $addFields: {
-        employeeCount: { $size: "$employeesCount" },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        store: { id: "$_id", name: "$storeName" },
-        employeeCount: 1,
-      },
-    },
-  ];
-
-  const byStore = await Progress.aggregate(pipeline);
-
-  // Additional metrics: completed employees, avg score per store.
-  const completedMetrics = await Progress.aggregate([
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    {
-      $group: {
-        _id: { storeId: "$employeeStoreId", employee: "$employee" },
-        totalEntries: { $sum: 1 },
-        completedEntries: {
-          $sum: { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0] },
-        },
-        scoreSum: {
-          $sum: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.score", -1] },
-              0,
-            ],
-          },
-        },
-        completedCountForAvg: {
-          $sum: {
-            $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-          },
-        },
-        attemptsSum: { $sum: "$attempts" },
-        storeName: { $first: "$employeeStoreName" },
-      },
-    },
-    {
-      $addFields: {
-        isCompleted: { $eq: ["$completedEntries", "$totalEntries"] },
-      },
-    },
-    {
-      $group: {
-        _id: "$_id.storeId",
-        storeName: { $first: "$storeName" },
-        completedEmployees: {
-          $sum: { $cond: [{ $eq: ["$isCompleted", true] }, 1, 0] },
-        },
-        employeeCount: { $sum: 1 },
-        averageScore: {
-          $cond: [
-            { $eq: [{ $sum: "$completedCountForAvg" }, 0] },
-            0,
-            {
-              $divide: [
-                { $sum: "$scoreSum" },
-                { $sum: "$completedCountForAvg" },
-              ],
-            },
-          ],
-        },
-      },
-    },
-    {
-      $addFields: {
-        completionPercentage: {
-          $cond: [
-            { $eq: ["$employeeCount", 0] },
-            0,
-            {
-              $multiply: [
-                { $divide: ["$completedEmployees", "$employeeCount"] },
-                100,
-              ],
-            },
-          ],
-        },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        store: { id: "$_id", name: "$storeName" },
-        employeeCount: 1,
-        completedEmployees: 1,
-        completionPercentage: { $round: ["$completionPercentage", 2] },
-        averageScore: { $round: ["$averageScore", 2] },
-      },
-    },
-  ]);
-
-  return completedMetrics;
-};
-
-export const getDesignationsReport = async () => {
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    {
-      $group: {
-        _id: "$employeeDesignationId",
-        designationTitle: { $first: "$employeeDesignationTitle" },
-      },
-    },
-  ];
-
-  // Metrics per designation
-  const metrics = await Progress.aggregate([
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    {
-      $group: {
-        _id: { designationId: "$employeeDesignationId", employee: "$employee" },
-        totalEntries: { $sum: 1 },
-        completedEntries: {
-          $sum: { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0] },
-        },
-        scoreSum: {
-          $sum: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.score", -1] },
-              0,
-            ],
-          },
-        },
-        completedCountForAvg: {
-          $sum: {
-            $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0],
-          },
-        },
-        designationTitle: { $first: "$employeeDesignationTitle" },
-      },
-    },
-    {
-      $addFields: {
-        isCompleted: { $eq: ["$completedEntries", "$totalEntries"] },
-      },
-    },
-    {
-      $group: {
-        _id: "$_id.designationId",
-        designationTitle: { $first: "$designationTitle" },
-        employeesCount: { $sum: 1 },
-        completedEmployees: {
-          $sum: { $cond: [{ $eq: ["$isCompleted", true] }, 1, 0] },
-        },
-        averageScore: {
-          $cond: [
-            { $eq: [{ $sum: "$completedCountForAvg" }, 0] },
-            0,
-            {
-              $divide: [
-                { $sum: "$scoreSum" },
-                { $sum: "$completedCountForAvg" },
-              ],
-            },
-          ],
-        },
-      },
-    },
-    {
-      $addFields: {
-        completionPercentage: {
-          $cond: [
-            { $eq: ["$employeesCount", 0] },
-            0,
-            {
-              $multiply: [
-                { $divide: ["$completedEmployees", "$employeesCount"] },
-                100,
-              ],
-            },
-          ],
-        },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        designation: { id: "$_id", title: "$designationTitle" },
-        employeeCount: "$employeesCount",
-        completedEmployees: 1,
-        completionPercentage: { $round: ["$completionPercentage", 2] },
-        averageScore: { $round: ["$averageScore", 2] },
-        videoCount: 0,
-      },
-    },
-  ]);
-
-  // Attach videoCount for each designation without N+1: one aggregation on videos.
-  const videoCounts = await Video.aggregate([
-    { $match: { isActive: true } },
-    { $group: { _id: "$designation", count: { $sum: 1 } } },
-    { $project: { _id: 0, designationId: "$_id", videoCount: "$count" } },
-  ]);
-  const map = new Map(
-    videoCounts.map((x) => [String(x.designationId), x.videoCount]),
+      return {
+        designationId: des._id,
+        designation: des.name,
+        employees: empCount,
+        completionPct,
+        completionFrac: `${completedCount}/${totalPossible}`,
+        bestStore,
+        bestStorePct: `${bestStorePct}%`,
+        atRisk,
+      };
+    }),
   );
 
-  return metrics.map((d) => ({
-    ...d,
-    videoCount: map.get(String(d.designation.id)) || 0,
-  }));
+  return rows.sort((a, b) => b.completionPct - a.completionPct);
 };
 
-export const getVideosAnalytics = async ({
-  page,
-  limit,
-  search,
-  designation,
-  status,
-}) => {
-  const p = toNumber(page, 1);
-  const l = toNumber(limit, 10);
-  const skip = (p - 1) * l;
+// ─────────────────────────────────────────────────────────────────────────
+// 3. BREAKDOWN BY STORE
+// ─────────────────────────────────────────────────────────────────────────
+export const getBreakdownByStore = async (period = "all") => {
+  const df = dateFilter(period);
+  const stores = await Store.find().lean();
 
-  const match = { videoIsActive: true };
-  if (designation)
-    match.videoDesignationId = new mongoose.Types.ObjectId(designation);
-  if (status) {
-    if (status === "completed") match.progressStatus = "completed";
-    if (status === "failed") match.progressStatus = { $ne: "completed" };
-  }
-  if (search) {
-    match.videoTitle = { $regex: search, $options: "i" };
-  }
+  const rows = await Promise.all(
+    stores.map(async (store) => {
+      const employees = await User.find(
+        { store: store._id, role: "Employee", isActive: true },
+        { _id: 1, designation: 1 },
+      ).lean();
 
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    { $match: match },
-    {
-      $group: {
-        _id: "$video",
-        videoTitle: { $first: "$videoTitle" },
-        assignedEmployeesSet: { $addToSet: "$employee" },
-        completedEmployeesSet: {
-          $addToSet: {
-            $cond: [
-              { $eq: ["$progressStatus", "completed"] },
-              "$employee",
-              null,
-            ],
-          },
-        },
-        failedAttempts: {
-          $sum: {
-            $cond: [{ $eq: ["$progressStatus", "completed"] }, 0, "$attempts"],
-          },
-        },
-        totalAttempts: { $sum: "$attempts" },
-        latestScores: {
-          $push: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.score", -1] },
-              null,
-            ],
-          },
-        },
-      },
-    },
-    {
-      $addFields: {
-        assignedEmployees: { $size: "$assignedEmployeesSet" },
-        completedEmployees: {
-          $size: {
-            $setDifference: ["$completedEmployeesSet", [null]],
-          },
-        },
-        averageScore: {
-          $let: {
-            vars: {
-              filtered: {
-                $filter: {
-                  input: "$latestScores",
-                  as: "s",
-                  cond: { $ne: ["$$s", null] },
-                },
+      const empIds = employees.map((e) => e._id);
+      const empCount = empIds.length;
+
+      // Total possible = sum of assigned videos per employee
+      let totalPossible = 0;
+      for (const emp of employees) {
+        const count = await Video.countDocuments({
+          designation: emp.designation,
+          isActive: true,
+        });
+        totalPossible += count;
+      }
+
+      const completedCount = await Progress.countDocuments({
+        employee: { $in: empIds },
+        status: "completed",
+        ...df,
+      });
+      const completionPct =
+        totalPossible > 0
+          ? Math.round((completedCount / totalPossible) * 100)
+          : 0;
+
+      const totalAttemptsAgg = await Progress.aggregate([
+        { $match: { employee: { $in: empIds }, ...df } },
+        { $group: { _id: null, total: { $sum: "$attempts" } } },
+      ]);
+      const totalAttempts = totalAttemptsAgg[0]?.total || 0;
+
+      const atRiskAgg = await Progress.aggregate([
+        { $match: { employee: { $in: empIds }, attempts: { $gt: 0 }, ...df } },
+        {
+          $group: {
+            _id: "$employee",
+            anyPass: {
+              $max: {
+                $cond: [
+                  {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: "$history",
+                            as: "h",
+                            cond: "$$h.passed",
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                  1,
+                  0,
+                ],
               },
             },
-            in: {
-              $cond: [
-                { $eq: [{ $size: "$$filtered" }, 0] },
-                0,
-                { $divide: [{ $sum: "$$filtered" }, { $size: "$$filtered" }] },
-              ],
-            },
           },
         },
-        averageAttempts: {
-          $cond: [
-            { $eq: [{ $size: "$assignedEmployeesSet" }, 0] },
-            0,
-            { $divide: ["$totalAttempts", { $size: "$assignedEmployeesSet" }] },
-          ],
-        },
-        completionPercentage: {
-          $cond: [
-            { $eq: [{ $size: "$assignedEmployeesSet" }, 0] },
-            0,
-            {
-              $multiply: [
-                {
-                  $divide: [
-                    {
-                      $size: {
-                        $setDifference: ["$completedEmployeesSet", [null]],
-                      },
-                    },
-                    { $size: "$assignedEmployeesSet" },
-                  ],
-                },
-                100,
-              ],
-            },
-          ],
-        },
-      },
-    },
-    { $sort: { completionPercentage: -1 } },
-    {
-      $facet: {
-        docs: [
-          { $skip: skip },
-          { $limit: l },
-          {
-            $project: {
-              _id: 0,
-              video: { id: "$_id", title: "$videoTitle" },
-              assignedEmployees: 1,
-              completedEmployees: 1,
-              failedAttempts: 1,
-              averageScore: { $round: ["$averageScore", 2] },
-              averageAttempts: { $round: ["$averageAttempts", 2] },
-              completionPercentage: { $round: ["$completionPercentage", 2] },
-            },
-          },
-        ],
-        totalCount: [{ $count: "count" }],
-      },
-    },
-  ];
+        { $match: { anyPass: 0 } },
+        { $count: "count" },
+      ]);
+      const atRisk = atRiskAgg[0]?.count || 0;
 
-  const [res] = await Progress.aggregate(pipeline);
-  const docs = res?.docs || [];
-  const total = res?.totalCount?.[0]?.count || 0;
+      return {
+        storeId: store._id,
+        store: store.name,
+        storeCode: store.code,
+        employees: empCount,
+        completionPct,
+        completionFrac: `${completedCount}/${totalPossible}`,
+        totalAttempts,
+        atRisk,
+      };
+    }),
+  );
 
-  return {
-    videos: docs,
-    total,
-    page: p,
-    limit: l,
-    totalPages: Math.ceil(total / l) || 1,
-  };
+  return rows.sort((a, b) => b.completionPct - a.completionPct);
 };
 
-export const getTopPerformers = async () => {
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    {
-      $group: {
-        _id: "$employee",
-        employee: {
-          $first: {
-            id: "$employee",
-            name: "$employeeName",
-            employeeId: "$employeeEmployeeId",
-          },
-        },
-        completedVideosCount: {
-          $sum: { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0] },
-        },
-        totalVideosEntries: { $sum: 1 },
-        sumLatestScores: {
-          $sum: {
-            $cond: [
-              { $gt: [{ $size: "$history" }, 0] },
-              { $arrayElemAt: ["$history.score", -1] },
-              0,
-            ],
-          },
-        },
-        completedCountForAvgScore: {
-          $sum: { $cond: [{ $eq: ["$progressStatus", "completed"] }, 1, 0] },
-        },
-      },
-    },
+// ─────────────────────────────────────────────────────────────────────────
+// 4. AT-RISK EMPLOYEES
+// ─────────────────────────────────────────────────────────────────────────
+export const getAtRiskEmployees = async (period = "all") => {
+  const df = dateFilter(period);
+
+  // Employees who have Progress docs with attempts > 0 but zero passes in history
+  const atRiskProgressAgg = await Progress.aggregate([
+    { $match: { attempts: { $gt: 0 }, ...df } },
     {
       $addFields: {
-        averageScore: {
-          $cond: [
-            { $eq: ["$completedCountForAvgScore", 0] },
-            0,
-            { $divide: ["$sumLatestScores", "$completedCountForAvgScore"] },
-          ],
-        },
-        completionPercentage: {
-          $cond: [
-            { $eq: ["$totalVideosEntries", 0] },
-            0,
-            {
-              $multiply: [
-                { $divide: ["$completedVideosCount", "$totalVideosEntries"] },
-                100,
-              ],
-            },
-          ],
+        passedCount: {
+          $size: {
+            $filter: { input: "$history", as: "h", cond: "$$h.passed" },
+          },
         },
       },
     },
-    { $sort: { averageScore: -1, completionPercentage: -1 } },
-    { $limit: 10 },
-    {
-      $project: {
-        _id: 0,
-        employee: 1,
-        averageScore: { $round: ["$averageScore", 2] },
-        completionPercentage: { $round: ["$completionPercentage", 2] },
-        completedVideos: "$completedVideosCount",
-      },
-    },
-  ];
-
-  return await Progress.aggregate(pipeline);
-};
-
-export const getFailedEmployees = async () => {
-  // Failed latest attempt => history.last attempt where passed=false.
-  const pipeline = [
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    { $unwind: { path: "$history", preserveNullAndEmptyArrays: false } },
-    {
-      $match: { "history.passed": false },
-    },
+    { $match: { passedCount: 0 } },
     {
       $group: {
         _id: "$employee",
-        employee: {
-          $first: {
-            id: "$employee",
-            name: "$employeeName",
-            employeeId: "$employeeEmployeeId",
-            email: "$employeeEmail",
-          },
-        },
-        latestFailedAttemptAt: { $max: "$history.attemptedAt" },
+        totalAttempts: { $sum: "$attempts" },
+        stuckVideos: { $addToSet: "$video" },
       },
     },
-    {
-      $lookup: {
-        from: "progresses",
-        let: { employeeId: "$_id" },
-        pipeline: [
-          {
-            $match: {
-              $expr: { $eq: ["$employee", "$$employeeId"] },
-            },
-          },
-          { $unwind: { path: "$history", preserveNullAndEmptyArrays: false } },
-          { $match: { "history.passed": false } },
-          {
-            $sort: { "history.attemptedAt": -1 },
-          },
-          { $limit: 1 },
-          {
-            $project: {
-              _id: 0,
-              score: "$history.score",
-              totalQuestions: "$history.totalQuestions",
-              attemptedAt: "$history.attemptedAt",
-              videoId: "$video",
-            },
-          },
-        ],
-        as: "latest",
-      },
-    },
-    { $unwind: { path: "$latest", preserveNullAndEmptyArrays: true } },
-    {
-      $project: {
-        _id: 0,
-        employee: 1,
-        latestFailedAttemptAt: 1,
-        latestAttempt: {
-          score: "$latest.score",
-          totalQuestions: "$latest.totalQuestions",
-          attemptedAt: "$latest.attemptedAt",
-          videoId: "$latest.videoId",
-        },
-      },
-    },
-    { $sort: { latestFailedAttemptAt: -1 } },
-  ];
+  ]);
 
-  return await Progress.aggregate(pipeline);
+  const empIds = atRiskProgressAgg.map((r) => r._id);
+
+  const employees = await User.find(
+    { _id: { $in: empIds }, role: "Employee", isActive: true },
+    { name: 1, email: 1, designation: 1, store: 1 },
+  )
+    .populate("designation", "name")
+    .populate("store", "name code")
+    .lean();
+
+  const result = await Promise.all(
+    employees.map(async (emp) => {
+      const row = atRiskProgressAgg.find(
+        (r) => String(r._id) === String(emp._id),
+      );
+
+      const assignedVideos = await Video.countDocuments({
+        designation: emp.designation?._id,
+        isActive: true,
+      });
+      const completedCount = await Progress.countDocuments({
+        employee: emp._id,
+        status: "completed",
+      });
+
+      // Video titles they're stuck on
+      const stuckTitles = await Video.find(
+        { _id: { $in: row?.stuckVideos || [] } },
+        { title: 1, videoId: 1 },
+      ).lean();
+
+      return {
+        _id: emp._id,
+        name: emp.name,
+        email: emp.email,
+        store: emp.store?.name || "—",
+        storeCode: emp.store?.code || "—",
+        designation: emp.designation?.name || "—",
+        completed: `${completedCount}/${assignedVideos}`,
+        attempts: row?.totalAttempts || 0,
+        passRate: "0%",
+        stuckVideos: stuckTitles.map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+        })),
+      };
+    }),
+  );
+
+  return result;
 };
 
-export const getRecentActivity = async () => {
-  const completedVideos = await Progress.aggregate([
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee", progressStatus: "completed" } },
-    { $sort: { completedAt: -1 } },
-    { $limit: 10 },
-    {
-      $project: {
-        _id: 0,
-        type: { $literal: "video_completed" },
-        employee: { id: "$employee", name: "$employeeName" },
-        video: { id: "$video", title: "$videoTitle" },
-        completedAt: 1,
-      },
-    },
-  ]);
+// ─────────────────────────────────────────────────────────────────────────
+// 5. TOP PERFORMERS  (100% completion)
+// ─────────────────────────────────────────────────────────────────────────
+export const getTopPerformers = async (period = "all") => {
+  const df = dateFilter(period);
 
-  const latestQuizAttempts = await Progress.aggregate([
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee" } },
-    { $unwind: { path: "$history", preserveNullAndEmptyArrays: false } },
-    { $sort: { "history.attemptedAt": -1 } },
-    { $limit: 10 },
-    {
-      $project: {
-        _id: 0,
-        type: { $literal: "quiz_attempt" },
-        employee: { id: "$employee", name: "$employeeName" },
-        video: { id: "$video", title: "$videoTitle" },
-        attemptedAt: "$history.attemptedAt",
-        score: "$history.score",
-        totalQuestions: "$history.totalQuestions",
-        passed: "$history.passed",
-      },
-    },
-  ]);
+  const employees = await User.find(
+    { role: "Employee", isActive: true },
+    { name: 1, email: 1, designation: 1, store: 1 },
+  )
+    .populate("designation", "name")
+    .populate("store", "name code")
+    .lean();
 
-  const latestUnlocks = await Progress.aggregate([
-    ...baseProgresAgg(),
-    { $match: { employeeRole: "Employee", progressStatus: "unlocked" } },
-    { $sort: { createdAt: -1 } },
-    { $limit: 10 },
-    {
-      $project: {
-        _id: 0,
-        type: { $literal: "video_unlocked" },
-        employee: { id: "$employee", name: "$employeeName" },
-        video: { id: "$video", title: "$videoTitle" },
-        unlockedAt: "$createdAt",
-      },
-    },
-  ]);
+  const performers = [];
 
-  return {
-    completedVideos,
-    latestQuizAttempts,
-    latestUnlocks,
-  };
-};
-
-export const exportReport = async ({ filters }) => {
-  // For export: use employees report as dataset.
-  const { search, designation, store, status } = filters || {};
-
-  const { employees } = await getEmployeesReport({
-    page: 1,
-    limit: 100000,
-    search,
-    designation,
-    store,
-    status,
-  });
-
-  const workbook = new exceljs.Workbook();
-  const worksheet = workbook.addWorksheet("Employees Report");
-
-  worksheet.columns = [
-    { header: "Employee ID", key: "employeeId", width: 14 },
-    { header: "Employee Name", key: "employeeName", width: 22 },
-    { header: "Email", key: "email", width: 28 },
-    { header: "Store", key: "storeName", width: 18 },
-    { header: "Designation", key: "designationTitle", width: 22 },
-    { header: "Completed Videos", key: "completedVideos", width: 18 },
-    { header: "Total Videos", key: "totalVideos", width: 12 },
-    { header: "Completion %", key: "completionPercentage", width: 16 },
-    { header: "Average Score", key: "averageScore", width: 16 },
-    { header: "Attempts", key: "attempts", width: 10 },
-    { header: "Last Activity", key: "lastActivityAt", width: 20 },
-    { header: "Current Status", key: "currentStatus", width: 16 },
-  ];
-
-  employees.forEach((e) => {
-    worksheet.addRow({
-      employeeId: e.employee.employeeId,
-      employeeName: e.employee.name,
-      email: e.employee.email,
-      storeName: e.store?.name,
-      designationTitle: e.designation?.title,
-      completedVideos: e.completedVideos,
-      totalVideos: e.totalVideos,
-      completionPercentage: e.completionPercentage,
-      averageScore: e.averageScore,
-      attempts: e.attempts,
-      lastActivityAt: e.lastActivityAt,
-      currentStatus: e.currentStatus,
+  for (const emp of employees) {
+    const assignedVideos = await Video.countDocuments({
+      designation: emp.designation?._id,
+      isActive: true,
     });
-  });
+    if (assignedVideos === 0) continue;
 
-  const buffer = await workbook.xlsx.writeBuffer();
-  return buffer;
-};
+    const completedCount = await Progress.countDocuments({
+      employee: emp._id,
+      status: "completed",
+      ...df,
+    });
+    if (completedCount < assignedVideos) continue;
 
-export default {
-  getDashboard,
-  getEmployeesReport,
-  getEmployeeDetails,
-  getStoresReport,
-  getDesignationsReport,
-  getVideosAnalytics,
-  getTopPerformers,
-  getFailedEmployees,
-  getRecentActivity,
-  exportReport,
+    const attemptsAgg = await Progress.aggregate([
+      { $match: { employee: emp._id, ...df } },
+      { $group: { _id: null, total: { $sum: "$attempts" } } },
+    ]);
+
+    performers.push({
+      _id: emp._id,
+      name: emp.name,
+      email: emp.email,
+      store: emp.store?.name || "—",
+      storeCode: emp.store?.code || "—",
+      designation: emp.designation?.name || "—",
+      completed: `${completedCount}/${assignedVideos}`,
+      attempts: attemptsAgg[0]?.total || 0,
+      passRate: "100%",
+    });
+  }
+
+  return performers;
 };
