@@ -35,9 +35,13 @@ export const register = async (body) => {
     user,
   };
 };
-export const login = async ({ userName }) => {
+export const login = async ({ userName, role }) => {
   if (!userName) {
     throw new ApiError(400, "Email or Employee ID is required");
+  }
+
+  if (!role) {
+    throw new ApiError(400, "Role is required");
   }
 
   const user = await User.findOne({
@@ -49,6 +53,14 @@ export const login = async ({ userName }) => {
 
   if (!user) {
     throw new ApiError(401, "Invalid Email or Employee ID");
+  }
+
+  // Check role
+  if (user.role !== role) {
+    throw new ApiError(
+      403,
+      `This account is not authorized to log in as ${role}.`,
+    );
   }
 
   const token = generateToken(user);
