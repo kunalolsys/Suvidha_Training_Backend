@@ -12,10 +12,12 @@ const videoSchema = new mongoose.Schema(
 
     veedUrl: String,
 
-    designation: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Designation",
-    },
+    designation: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Designation",
+      },
+    ],
 
     sortOrder: Number,
 

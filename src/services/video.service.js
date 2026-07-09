@@ -6,7 +6,7 @@ export const createVideo = async (body) => {
   const { title, veedUrl, designation, sortOrder, duration, thumbnail } = body;
 
   const exists = await Video.findOne({
-    designation,
+    designation: { $in: designation },
     sortOrder,
     isActive: true,
   });
@@ -34,9 +34,10 @@ export const getVideos = async ({
   const filter = {
     isActive: true,
   };
-
   if (designation) {
-    filter.designation = designation;
+    filter.designation = Array.isArray(designation)
+      ? { $in: designation }
+      : designation;
   }
 
   if (search) {
@@ -74,7 +75,9 @@ export const getVideosForEmployee = async ({ designation }) => {
   };
 
   if (designation) {
-    filter.designation = designation;
+    filter.designation = Array.isArray(designation)
+      ? { $in: designation }
+      : designation;
   }
 
   const [videos, total] = await Promise.all([
@@ -120,16 +123,23 @@ export const updateVideo = async (id, body) => {
     throw new ApiError(404, "Video not found");
   }
 
-  if (body.sortOrder && body.sortOrder !== video.sortOrder) {
+  if (body.sortOrder || body.designation) {
+    const targetSortOrder =
+      body.sortOrder !== undefined ? body.sortOrder : video.sortOrder;
+    const targetDesignation = body.designation || video.designation;
+
     const exists = await Video.findOne({
       _id: { $ne: id },
-      designation: body.designation || video.designation,
-      sortOrder: body.sortOrder,
+      designation: { $in: targetDesignation },
+      sortOrder: targetSortOrder,
       isActive: true,
     });
 
     if (exists) {
-      throw new ApiError(409, "Sort order already exists");
+      throw new ApiError(
+        409,
+        "Sort order already exists in one of the selected designations",
+      );
     }
   }
 
