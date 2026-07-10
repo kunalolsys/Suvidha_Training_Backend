@@ -14,11 +14,9 @@ const userSchema = new mongoose.Schema(
 
     email: {
       type: String,
-      unique: true,
-      required: true,
       lowercase: true,
+      trim: true,
     },
-
     password: {
       type: String,
       required: true,
@@ -51,5 +49,13 @@ const userSchema = new mongoose.Schema(
     timestamps: true,
   },
 );
-
+userSchema.index(
+  { email: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      email: { $exists: true, $type: "string" },
+    },
+  },
+);
 export default mongoose.model("User", userSchema);

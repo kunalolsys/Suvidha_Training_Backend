@@ -1,6 +1,9 @@
 import User from "../models/User.js";
 import ApiError from "../utils/ApiError.js";
-
+import axios from "axios";
+import Designation from "../models/Designation.js";
+import Store from "../models/Store.js";
+import bcrypt from "bcryptjs";
 export const getUsers = async ({
   page = 1,
   limit = 10,
@@ -118,4 +121,158 @@ export const updateUser = async (id, payload) => {
     .populate("designation", "name")
     .populate("store", "name")
     .select("-password");
+};
+
+//**SYNC USERS */
+export const syncStuEmployees = async (req, res) => {
+  try {
+    const { data: stuEmployees } = await axios.post(
+      "https://mis.suvidhastores.com/api/load-ften-data",
+    );
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let activated = 0;
+    let deactivated = 0;
+
+    // Store all employee codes from STU
+    const stuEmployeeIds = new Set(
+      stuEmployees.map((emp) => String(emp.employee_code).trim()),
+    );
+
+    for (const emp of stuEmployees) {
+      const employeeId = String(emp.employee_code).trim();
+
+      // const designation = await Designation.findOne({
+      //   name: emp.designation,
+      // });
+
+      // const store = await Store.findOne({
+      //   name: emp.location,
+      // });
+
+      const designations = await Designation.find();
+      const stores = await Store.find();
+
+      const designationMap = new Map(designations.map((d) => [d.name, d._id]));
+
+      const storeMap = new Map(stores.map((s) => [s.name, s._id]));
+      const designation = designationMap.get(emp.designation);
+      const store = storeMap.get(emp.location);
+
+      // const existingUser = await User.findOne({ employeeId });
+      const users = await User.find();
+
+      const userMap = new Map(users.map((u) => [u.employeeId, u]));
+      const existingUser = userMap.get(employeeId);
+      
+      if (existingUser && existingUser.role === "Admin") {
+        skipped++;
+        continue;
+      }
+      // CREATE NEW USER
+      if (!existingUser) {
+        const password = await bcrypt.hash(employeeId, 10);
+
+        await User.create({
+          employeeId,
+          name: emp.name,
+          // email:
+          //   emp.email && emp.email !== "NULL"
+          //     ? emp.email.toLowerCase()
+          //     : `${employeeId}@stu.com`,
+          password,
+          role: emp.Role || "Employee",
+          designation: designation?._id,
+          store: store?._id,
+          isActive: true,
+        });
+
+        created++;
+        continue;
+      }
+
+      const updateData = {};
+
+      if (existingUser.name !== emp.name) {
+        updateData.name = emp.name;
+      }
+
+      if (
+        emp.email &&
+        emp.email !== "NULL" &&
+        existingUser.email !== emp.email.toLowerCase()
+      ) {
+        updateData.email = emp.email.toLowerCase();
+      }
+
+      if (existingUser.role !== (emp.Role || "Employee")) {
+        updateData.role = emp.Role || "Employee";
+      }
+
+      if (
+        designation &&
+        String(existingUser.designation) !== String(designation._id)
+      ) {
+        updateData.designation = designation._id;
+      }
+
+      if (store && String(existingUser.store) !== String(store._id)) {
+        updateData.store = store._id;
+      }
+
+      // Activate if currently inactive
+      if (!existingUser.isActive) {
+        updateData.isActive = true;
+        activated++;
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await User.findByIdAndUpdate(existingUser._id, updateData);
+        updated++;
+      } else {
+        skipped++;
+      }
+    }
+
+    // Deactivate users not present in STU sheet
+    const usersToDeactivate = await User.find({
+      employeeId: { $nin: [...stuEmployeeIds] },
+      isActive: true,
+      role: { $ne: "Admin" },
+    });
+
+    if (usersToDeactivate.length > 0) {
+      await User.updateMany(
+        {
+          employeeId: { $nin: [...stuEmployeeIds] },
+          isActive: true,
+          role: { $ne: "Admin" },
+        },
+        {
+          $set: { isActive: false },
+        },
+      );
+
+      deactivated = usersToDeactivate.length;
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Employee sync completed successfully.",
+      created,
+      updated,
+      skipped,
+      activated,
+      deactivated,
+      totalFromSTU: stuEmployees.length,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
 };
