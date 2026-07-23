@@ -9,6 +9,7 @@ import userRoutes from "./user.routes.js";
 import progressRoutes from "./progress.routes.js";
 import dashboardRoutes from "./dashboard.routes.js";
 import exportReportRoutes from "./exportReport.routes.js";
+import vimeoRoutes from "./vimeo.routes.js";
 
 const router = express.Router();
 router.use("/auth", authRoutes);
@@ -22,5 +23,6 @@ router.use("/progress", progressRoutes);
 router.use("/reports", reportRoutes);
 router.use("/dashboard", dashboardRoutes);
 router.use("/export", exportReportRoutes);
+router.use("/vimeo", vimeoRoutes);
 export default router;
 

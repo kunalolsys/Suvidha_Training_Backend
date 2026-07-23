@@ -5,11 +5,14 @@ const storeSchema = new mongoose.Schema(
     name: {
       type: String,
       required: true,
+      unique: true,
+      trim: true,
     },
 
     code: {
       type: String,
       unique: true,
+      sparse: true,
     },
 
     address: String,

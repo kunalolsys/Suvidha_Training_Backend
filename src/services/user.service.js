@@ -154,22 +154,68 @@ export const syncStuEmployees = async (req, res) => {
       const designations = await Designation.find();
       const stores = await Store.find();
 
-      const designationMap = new Map(designations.map((d) => [d.name, d._id]));
+      const designationMap = new Map(
+        designations.map((d) => [d.name.trim().toLowerCase(), d]),
+      );
 
-      const storeMap = new Map(stores.map((s) => [s.name, s._id]));
-      const designation = designationMap.get(emp.designation);
-      const store = storeMap.get(emp.location);
+      const storeMap = new Map(
+        stores.map((s) => [s.name.trim().toLowerCase(), s]),
+      );
+      const designationName = (emp.designation || "").trim();
+      const storeName = (emp.location || "").trim();
+
+      // DESIGNATION
+      let designation = designationMap.get(designationName.toLowerCase());
+
+      if (!designation && designationName) {
+        designation = await Designation.findOne({
+          name: designationName,
+        });
+
+        if (!designation) {
+          designation = await Designation.create({
+            name: designationName,
+          });
+        }
+
+        designationMap.set(designationName.toLowerCase(), designation);
+      }
+
+      // STORE
+      let store = storeMap.get(storeName.toLowerCase());
+
+      if (!store && storeName) {
+        store = await Store.findOne({
+          name: storeName,
+        });
+
+        if (!store) {
+          store = await Store.create({
+            name: storeName,
+          });
+        }
+
+        storeMap.set(storeName.toLowerCase(), store);
+      }
 
       // const existingUser = await User.findOne({ employeeId });
       const users = await User.find();
 
       const userMap = new Map(users.map((u) => [u.employeeId, u]));
       const existingUser = userMap.get(employeeId);
-      
+
       if (existingUser && existingUser.role === "Admin") {
         skipped++;
         continue;
       }
+      if (!designation) {
+        skipped++;
+        console.log(
+          `Skipping Employee ${employeeId} (${emp.name}) - Designation missing`,
+        );
+        continue;
+      }
+
       // CREATE NEW USER
       if (!existingUser) {
         const password = await bcrypt.hash(employeeId, 10);

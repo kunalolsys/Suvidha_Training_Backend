@@ -6,11 +6,26 @@ const videoSchema = new mongoose.Schema(
     videoId: {
       type: String,
       unique: true,
+      trim: true,
     },
 
-    title: String,
+    title: {
+      type: String,
+      required: [true, "Video title is required"],
+      trim: true,
+    },
 
-    veedUrl: String,
+    veedUrl: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    vimeoId: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
     designation: [
       {
@@ -19,11 +34,21 @@ const videoSchema = new mongoose.Schema(
       },
     ],
 
-    sortOrder: Number,
+    sortOrder: {
+      type: Number,
+      default: 1,
+    },
 
-    duration: String,
+    duration: {
+      type: String,
+      default: "",
+    },
 
-    thumbnail: String,
+    thumbnail: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
     isActive: {
       type: Boolean,
@@ -34,6 +59,8 @@ const videoSchema = new mongoose.Schema(
     timestamps: true,
   },
 );
+
+// Auto-increment Video ID before saving
 videoSchema.pre("save", async function () {
   if (!this.isNew || this.videoId) return;
 
@@ -41,8 +68,8 @@ videoSchema.pre("save", async function () {
     { _id: "video" },
     { $inc: { seq: 1 } },
     {
+      new: true, // Legacy compatibility alias for returnDocument: 'after'
       upsert: true,
-      returnDocument: "after",
     },
   );
 

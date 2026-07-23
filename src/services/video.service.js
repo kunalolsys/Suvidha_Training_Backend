@@ -3,7 +3,7 @@ import Video from "../models/Video.js";
 import ApiError from "../utils/ApiError.js";
 
 export const createVideo = async (body) => {
-  const { title, veedUrl, designation, sortOrder, duration, thumbnail } = body;
+  const { title, veedUrl,vimeoId, designation, sortOrder, duration, thumbnail } = body;
 
   const exists = await Video.findOne({
     designation: { $in: designation },
@@ -18,6 +18,7 @@ export const createVideo = async (body) => {
   return await Video.create({
     title,
     veedUrl,
+    vimeoId,
     designation,
     sortOrder,
     duration,
