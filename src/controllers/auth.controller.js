@@ -33,7 +33,26 @@ export const changePassword = asyncHandler(async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, "Password changed successfully"));
 });
+export const updateProfile = asyncHandler(async (req, res) => {
+  const userId = req.user?._id || req.cookies?.userId;
 
+  if (!userId) {
+    throw new ApiError(401, "Unauthorized access: User session missing");
+  }
+
+  const { name, email, avatar } = req.body;
+
+  // Call the updateProfile service function
+  const updatedUser = await authService.updateProfile(userId, {
+    name,
+    email,
+    avatar,
+  });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, updatedUser, "Profile updated successfully"));
+});
 //**BULK IMPORT USER */
 export const bulkImportUsers = asyncHandler(async (req, res) => {
   if (!req.file) {

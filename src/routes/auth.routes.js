@@ -14,6 +14,7 @@ router.post("/login", authController.login);
 router.get("/profile", protect, authController.profile);
 
 router.patch("/change-password", protect, authController.changePassword);
+router.put("/update-profile", protect, authController.updateProfile);
 
 const storage = multer.memoryStorage();
 const upload = multer({

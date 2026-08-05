@@ -5,6 +5,7 @@ import generateToken from "../utils/generateToken.js";
 import csvParser from "csv-parser";
 import { Readable } from "stream";
 import mongoose from "mongoose";
+
 export const register = async (body) => {
   const { name, email, password, role, designation, store, employeeId } = body;
 
@@ -35,7 +36,8 @@ export const register = async (body) => {
     user,
   };
 };
-export const login = async ({ userName, role }) => {
+
+export const login = async ({ userName, password, role }) => {
   if (!userName) {
     throw new ApiError(400, "Email or Employee ID is required");
   }
@@ -44,10 +46,16 @@ export const login = async ({ userName, role }) => {
     throw new ApiError(400, "Role is required");
   }
 
+  // 🔒 Admin Password Validation Check
+  if (role === "Admin" && !password) {
+    throw new ApiError(400, "Password is required for Admin login");
+  }
+
   const user = await User.findOne({
     $or: [{ email: userName.toLowerCase() }, { employeeId: userName }],
     isActive: true,
   })
+    .select("+password") // Explicitly include password if schema has select: false
     .populate("designation")
     .populate("store");
 
@@ -63,6 +71,14 @@ export const login = async ({ userName, role }) => {
     );
   }
 
+  // 🔒 Verify Password ONLY for Admin
+  if (role === "Admin") {
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      throw new ApiError(401, "Invalid password");
+    }
+  }
+
   const token = generateToken(user);
 
   user.password = undefined;
@@ -72,33 +88,6 @@ export const login = async ({ userName, role }) => {
     user,
   };
 };
-
-// export const login = async ({ email, password }) => {
-//   const user = await User.findOne({
-//     email: email.toLowerCase(),
-//   })
-//     .populate("designation")
-//     .populate("store");
-
-//   if (!user) {
-//     throw new ApiError(401, "Invalid email or password");
-//   }
-
-//   const match = await bcrypt.compare(password, user.password);
-
-//   if (!match) {
-//     throw new ApiError(401, "Invalid email or password");
-//   }
-
-//   const token = generateToken(user);
-
-//   user.password = undefined;
-
-//   return {
-//     token,
-//     user,
-//   };
-// };
 
 export const profile = async (userId) => {
   const user = await User.findById(userId)
@@ -131,6 +120,47 @@ export const changePassword = async (userId, oldPassword, newPassword) => {
   await user.save();
 
   return true;
+};
+
+// 🟢 NEW: Update Admin Profile Details (Name, Email, Phone, Avatar)
+export const updateProfile = async (userId, updateData) => {
+  const { name, email, avatar } = updateData;
+
+  const user = await User.findById(userId);
+
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const updates = {};
+
+  // Check for email collision if email is being updated
+  if (email && email.toLowerCase() !== user.email) {
+    const existingEmail = await User.findOne({
+      email: email.toLowerCase(),
+      _id: { $ne: userId },
+    });
+
+    if (existingEmail) {
+      throw new ApiError(409, "Email is already taken by another user");
+    }
+    updates.email = email.toLowerCase();
+  }
+
+  if (name) updates.name = name;
+  if (avatar !== undefined) updates.avatar = avatar;
+
+  // Perform update without triggering 'password required' validation on save
+  const updatedUser = await User.findByIdAndUpdate(
+    userId,
+    { $set: updates },
+    { new: true, runValidators: true },
+  )
+    .populate("designation")
+    .populate("store")
+    .select("-password");
+
+  return updatedUser;
 };
 
 //**BULK IMPORT */

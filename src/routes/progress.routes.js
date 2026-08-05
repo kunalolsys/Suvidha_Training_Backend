@@ -7,5 +7,6 @@ const router = express.Router();
 router.patch("/update-status", protect, progressController.updateVideoStatus);
 router.post("/submit-quiz", protect, progressController.submitQuizAttempt);
 router.get("/my-dashboard", protect, progressController.getMyProgress);
+router.get("/get-certificate", protect, progressController.getMyCertificateData);
 
 export default router;
