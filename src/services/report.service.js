@@ -20,28 +20,36 @@ const dateFilter = (period) => {
 export const getReportStats = async (period = "all") => {
   const df = dateFilter(period);
 
-  // 1. Fetch total employees and count active videos grouped per designation ID
-  const [totalEmployees, videoCountByDesignation] = await Promise.all([
+  // 1. Fetch total employees and active videos
+  const [totalEmployees, activeVideos] = await Promise.all([
     User.countDocuments({ role: "Employee", isActive: true }),
-    Video.aggregate([
-      { $match: { isActive: true } },
-      { $unwind: "$designation" },
-      { $group: { _id: "$designation", count: { $sum: 1 } } },
-    ]),
+    Video.find({ isActive: true }, { _id: 1, designation: 1 }).lean(),
   ]);
 
-  // Convert designation video counts into a HashMap lookup: { designationId: count }
-  const videoCountMap = videoCountByDesignation.reduce((acc, curr) => {
-    acc[curr._id.toString()] = curr.count;
-    return acc;
-  }, {});
+  const activeVideoIds = activeVideos.map((v) => v._id);
 
-  // 2. Execute complex metrics aggregation pipeline
+  // Map active videos per designation
+  const videoCountMap = {};
+  for (const v of activeVideos) {
+    if (Array.isArray(v.designation)) {
+      for (const dId of v.designation) {
+        const idStr = String(dId);
+        videoCountMap[idStr] = (videoCountMap[idStr] || 0) + 1;
+      }
+    }
+  }
+
+  // 2. Aggregate progress metrics ONLY for ACTIVE videos
   const statsAggregation = await Progress.aggregate([
+    {
+      $match: {
+        video: { $in: activeVideoIds },
+        ...df,
+      },
+    },
     {
       $facet: {
         mainMetrics: [
-          { $match: df },
           {
             $group: {
               _id: null,
@@ -159,7 +167,7 @@ export const getReportStats = async (period = "all") => {
     }
   }
 
-  // 4. Calculate at-risk employees (attempted quizzes but zero passes)
+  // 4. Calculate at-risk employees
   const needAttention = employeeRecords.filter(
     (rec) => rec.totalAttempts > 0 && rec.hasAnyPass === 0,
   ).length;
@@ -174,7 +182,7 @@ export const getReportStats = async (period = "all") => {
       : 0;
 
   return {
-    overallCompletion: `${overallCompletion}%`,
+    overallCompletion: `${Math.min(overallCompletion, 100)}%`,
     employeesAt100: `${atHundredPct}/${totalEmployees}`,
     firstTryPassRate: `${firstTryPassRate}%`,
     totalQuizAttempts: main.totalAttempts,
@@ -198,6 +206,8 @@ export const getBreakdownByDesignation = async (period = "all") => {
     Video.find({ isActive: true }, { designation: 1 }).lean(),
   ]);
 
+  const activeVideoIds = videos.map((v) => v._id);
+
   // Map designation IDs to total assigned videos
   const videoCountPerDesig = {};
   for (const v of videos) {
@@ -218,9 +228,9 @@ export const getBreakdownByDesignation = async (period = "all") => {
     empByDesig[dStr].push(emp);
   }
 
-  // Execute single bulk aggregation for completed counts and at-risk calculations
+  // Progress aggregation ONLY for ACTIVE videos
   const progressAgg = await Progress.aggregate([
-    { $match: { ...df } },
+    { $match: { video: { $in: activeVideoIds }, ...df } },
     {
       $group: {
         _id: "$employee",
@@ -269,7 +279,6 @@ export const getBreakdownByDesignation = async (period = "all") => {
     let completedCount = 0;
     let atRisk = 0;
 
-    // Group store completion calculation
     const storeEmpsMap = {};
 
     for (const emp of desEmployees) {
@@ -277,7 +286,8 @@ export const getBreakdownByDesignation = async (period = "all") => {
       const prog = empProgressMap[eIdStr];
 
       if (prog) {
-        completedCount += prog.completedCount;
+        // Cap completed count per employee to assignedVideos count to prevent > 100%
+        completedCount += Math.min(prog.completedCount, assignedVideos);
         if (prog.hasAttempts > 0 && prog.hasAnyPass === 0) {
           atRisk++;
         }
@@ -286,7 +296,8 @@ export const getBreakdownByDesignation = async (period = "all") => {
       if (emp.store) {
         const sIdStr = String(emp.store);
         if (!storeEmpsMap[sIdStr]) storeEmpsMap[sIdStr] = 0;
-        if (prog) storeEmpsMap[sIdStr] += prog.completedCount;
+        if (prog)
+          storeEmpsMap[sIdStr] += Math.min(prog.completedCount, assignedVideos);
       }
     }
 
@@ -308,7 +319,7 @@ export const getBreakdownByDesignation = async (period = "all") => {
         possible > 0 ? Math.round((storeCompleted / possible) * 100) : 0;
 
       if (pct >= bestStorePct) {
-        bestStorePct = pct;
+        bestStorePct = Math.min(pct, 100);
         const storeDoc = allStores.find((s) => String(s._id) === storeId);
         bestStore = storeDoc?.name || "—";
       }
@@ -318,10 +329,10 @@ export const getBreakdownByDesignation = async (period = "all") => {
       designationId: des._id,
       designation: des.name,
       employees: empCount,
-      completionPct,
+      completionPct: Math.min(completionPct, 100),
       completionFrac: `${completedCount}/${totalPossible}`,
       bestStore,
-      bestStorePct: `${bestStorePct}%`,
+      bestStorePct: `${Math.min(bestStorePct, 100)}%`,
       atRisk,
     };
   });
@@ -344,6 +355,8 @@ export const getBreakdownByStore = async (period = "all") => {
     Video.find({ isActive: true }, { designation: 1 }).lean(),
   ]);
 
+  const activeVideoIds = videos.map((v) => v._id);
+
   // Video count map per designation
   const videoCountPerDesig = {};
   for (const v of videos) {
@@ -364,9 +377,9 @@ export const getBreakdownByStore = async (period = "all") => {
     storeEmpMap[sStr].push(emp);
   }
 
-  // Progress aggregation
+  // Progress aggregation ONLY for ACTIVE videos
   const progressAgg = await Progress.aggregate([
-    { $match: { ...df } },
+    { $match: { video: { $in: activeVideoIds }, ...df } },
     {
       $group: {
         _id: "$employee",
@@ -422,7 +435,7 @@ export const getBreakdownByStore = async (period = "all") => {
 
       const prog = empProgressMap[String(emp._id)];
       if (prog) {
-        completedCount += prog.completedCount;
+        completedCount += Math.min(prog.completedCount, assignedVideos);
         totalAttempts += prog.totalAttempts;
         if (prog.totalAttempts > 0 && prog.hasAnyPass === 0) {
           atRisk++;
@@ -440,7 +453,7 @@ export const getBreakdownByStore = async (period = "all") => {
       store: store.name,
       storeCode: store.code,
       employees: empCount,
-      completionPct,
+      completionPct: Math.min(completionPct, 100),
       completionFrac: `${completedCount}/${totalPossible}`,
       totalAttempts,
       atRisk,
@@ -456,8 +469,11 @@ export const getBreakdownByStore = async (period = "all") => {
 export const getAtRiskEmployees = async (period = "all") => {
   const df = dateFilter(period);
 
+  const activeVideos = await Video.find({ isActive: true }, { _id: 1 }).lean();
+  const activeVideoIds = activeVideos.map((v) => v._id);
+
   const atRiskProgressAgg = await Progress.aggregate([
-    { $match: { attempts: { $gt: 0 }, ...df } },
+    { $match: { video: { $in: activeVideoIds }, attempts: { $gt: 0 }, ...df } },
     {
       $addFields: {
         passedCount: {
@@ -504,6 +520,7 @@ export const getAtRiskEmployees = async (period = "all") => {
 
       const completedCount = await Progress.countDocuments({
         employee: emp._id,
+        video: { $in: activeVideoIds },
         status: "completed",
       });
 
@@ -519,7 +536,7 @@ export const getAtRiskEmployees = async (period = "all") => {
         store: emp.store?.name || "—",
         storeCode: emp.store?.code || "—",
         designation: emp.designation?.name || "—",
-        completed: `${completedCount}/${assignedVideos}`,
+        completed: `${Math.min(completedCount, assignedVideos)}/${assignedVideos}`,
         attempts: row?.totalAttempts || 0,
         passRate: "0%",
         stuckVideos: stuckTitles.map((v) => ({
@@ -539,50 +556,83 @@ export const getAtRiskEmployees = async (period = "all") => {
 export const getTopPerformers = async (period = "all") => {
   const df = dateFilter(period);
 
-  const employees = await User.find(
-    { role: "Employee", isActive: true },
-    { name: 1, email: 1, designation: 1, store: 1 },
-  )
-    .populate("designation", "name")
-    .populate("store", "name code")
-    .lean();
+  // 1. Fetch active employees and active video IDs in parallel (2 DB queries)
+  const [employees, activeVideos] = await Promise.all([
+    User.find(
+      { role: "Employee", isActive: true },
+      { name: 1, email: 1, designation: 1, store: 1 },
+    )
+      .populate("designation", "name")
+      .populate("store", "name code")
+      .lean(),
+    Video.find({ isActive: true }, { designation: 1 }).lean(),
+  ]);
 
+  const activeVideoIds = activeVideos.map((v) => v._id);
+
+  // 2. Count active assigned videos grouped per designation in memory
+  const videoCountPerDesig = {};
+  for (const v of activeVideos) {
+    if (Array.isArray(v.designation)) {
+      for (const dId of v.designation) {
+        const idStr = String(dId);
+        videoCountPerDesig[idStr] = (videoCountPerDesig[idStr] || 0) + 1;
+      }
+    }
+  }
+
+  // 3. Bulk aggregate progress metrics for ALL active employees (1 DB query)
+  const progressAgg = await Progress.aggregate([
+    {
+      $match: {
+        video: { $in: activeVideoIds },
+        ...df,
+      },
+    },
+    {
+      $group: {
+        _id: "$employee",
+        completedCount: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        totalAttempts: { $sum: "$attempts" },
+      },
+    },
+  ]);
+
+  // Index progress results by employee ID for O(1) lookup speed
+  const empProgressMap = progressAgg.reduce((acc, curr) => {
+    acc[String(curr._id)] = curr;
+    return acc;
+  }, {});
+
+  // 4. Build top performers list in memory
   const performers = [];
 
   for (const emp of employees) {
-    if (!emp.designation?._id) continue;
+    const desigId = emp.designation?._id ? String(emp.designation._id) : null;
+    if (!desigId) continue;
 
-    const assignedVideos = await Video.countDocuments({
-      designation: { $in: [emp.designation._id] },
-      isActive: true,
-    });
-
+    const assignedVideos = videoCountPerDesig[desigId] || 0;
     if (assignedVideos === 0) continue;
 
-    const completedCount = await Progress.countDocuments({
-      employee: emp._id,
-      status: "completed",
-      ...df,
-    });
+    const prog = empProgressMap[String(emp._id)];
+    const completedCount = prog?.completedCount || 0;
 
-    if (completedCount < assignedVideos) continue;
-
-    const attemptsAgg = await Progress.aggregate([
-      { $match: { employee: emp._id, ...df } },
-      { $group: { _id: null, total: { $sum: "$attempts" } } },
-    ]);
-
-    performers.push({
-      _id: emp._id,
-      name: emp.name,
-      email: emp.email,
-      store: emp.store?.name || "—",
-      storeCode: emp.store?.code || "—",
-      designation: emp.designation?.name || "—",
-      completed: `${completedCount}/${assignedVideos}`,
-      attempts: attemptsAgg[0]?.total || 0,
-      passRate: "100%",
-    });
+    // Check if employee has completed all assigned videos
+    if (completedCount >= assignedVideos) {
+      performers.push({
+        _id: emp._id,
+        name: emp.name,
+        email: emp.email,
+        store: emp.store?.name || "—",
+        storeCode: emp.store?.code || "—",
+        designation: emp.designation?.name || "—",
+        completed: `${assignedVideos}/${assignedVideos}`,
+        attempts: prog?.totalAttempts || 0,
+        passRate: "100%",
+      });
+    }
   }
 
   return performers;

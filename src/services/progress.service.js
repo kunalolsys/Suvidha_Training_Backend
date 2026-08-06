@@ -2,16 +2,20 @@
 import Progress from "../models/Progress.js";
 import Video from "../models/Video.js";
 import Question from "../models/Question.js";
+import User from "../models/User.js";
 import ApiError from "../utils/ApiError.js";
 
 /**
  * Update video status (e.g., locked -> unlocked -> completed)
  */
 export const updateVideoStatus = async (userId, videoId, status) => {
-  const video = await Video.findById(videoId);
+  const video = await Video.findById(videoId).populate("designation", "name");
   if (!video) {
     throw new ApiError(404, "Video module not found");
   }
+
+  // Fetch employee to capture current designation at time of status update
+  const employee = await User.findById(userId).populate("designation", "name");
 
   let progress = await Progress.findOne({ employee: userId, video: videoId });
 
@@ -19,6 +23,7 @@ export const updateVideoStatus = async (userId, videoId, status) => {
     progress = new Progress({
       employee: userId,
       video: videoId,
+      designation: employee?.designation?._id || user?.designation,
       status: status,
     });
   } else {
@@ -26,15 +31,21 @@ export const updateVideoStatus = async (userId, videoId, status) => {
     if (progress.status !== "completed") {
       progress.status = status;
     }
+    // Update active designation reference if not already saved
+    if (!progress.designation && employee?.designation) {
+      progress.designation = employee.designation._id;
+    }
   }
 
   if (status === "completed" && !progress.completedAt) {
     progress.completedAt = new Date();
-    // Freeze video metadata snapshot at the time of completion
+    // Freeze video metadata snapshot + designation at the time of completion
     progress.videoSnapshot = {
       title: video.title,
       sortOrder: video.sortOrder,
       duration: video.duration,
+      designationName:
+        employee?.designation?.name || video.designation?.name || "",
     };
   }
 
@@ -50,10 +61,13 @@ export const updateVideoStatus = async (userId, videoId, status) => {
  * @param {Array<{ questionId: string, selectedOption: number }>} userAnswers - Client submitted answers
  */
 export const submitQuizAttempt = async (userId, videoId, userAnswers) => {
-  const video = await Video.findById(videoId);
+  const video = await Video.findById(videoId).populate("designation", "name");
   if (!video) {
     throw new ApiError(404, "Target video training not found");
   }
+
+  // Fetch employee to attach designation context
+  const employee = await User.findById(userId).populate("designation", "name");
 
   // Fetch current active questions for this video
   const liveQuestions = await Question.find({ video: videoId }).sort({
@@ -101,7 +115,7 @@ export const submitQuizAttempt = async (userId, videoId, userAnswers) => {
 
   const totalQuestions = liveQuestions.length;
   const score = Math.round((correctCount / totalQuestions) * 100);
-  const PASS_THRESHOLD = 60; // Pass mark percentage (Adjust as needed)
+  const PASS_THRESHOLD = 60; // Pass mark percentage
   const passed = score >= PASS_THRESHOLD;
 
   // Retrieve or initialize user progress
@@ -111,8 +125,11 @@ export const submitQuizAttempt = async (userId, videoId, userAnswers) => {
     progress = new Progress({
       employee: userId,
       video: videoId,
+      designation: employee?.designation?._id,
       status: "unlocked",
     });
+  } else if (!progress.designation && employee?.designation) {
+    progress.designation = employee.designation._id;
   }
 
   progress.attempts += 1;
@@ -134,6 +151,8 @@ export const submitQuizAttempt = async (userId, videoId, userAnswers) => {
       title: video.title,
       sortOrder: video.sortOrder,
       duration: video.duration,
+      designationName:
+        employee?.designation?.name || video.designation?.name || "",
     };
   }
 
@@ -157,7 +176,14 @@ export const getEmployeeProgress = async (userId) => {
     .populate({
       path: "video",
       select: "title veedUrl sortOrder duration designation isActive",
-      // Include soft-deleted/inactive videos if completed by the user
+      populate: {
+        path: "designation",
+        select: "name",
+      },
+    })
+    .populate({
+      path: "designation",
+      select: "name",
     })
     .sort({ createdAt: -1 });
 
@@ -176,8 +202,8 @@ export const getCertificateData = async (userId) => {
 
   const certificateModules = completedProgress.map((p) => ({
     videoId: p.video,
-    // Prefers frozen video metadata snapshot if live video title was edited by admin
     videoTitle: p.videoSnapshot?.title || p.video?.title || "Training Module",
+    designationName: p.videoSnapshot?.designationName || "",
     completedAt: p.completedAt,
     bestAttempt:
       p.history.filter((h) => h.passed).sort((a, b) => b.score - a.score)[0] ||

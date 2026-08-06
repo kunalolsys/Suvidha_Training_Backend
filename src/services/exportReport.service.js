@@ -27,10 +27,12 @@ export const buildDesignationReport = async (period = "all") => {
     Store.find().lean(),
     User.find(
       { role: "Employee", isActive: true },
-      { _id: 1, store: 1, designation: 1 }
+      { _id: 1, store: 1, designation: 1 },
     ).lean(),
     Video.find({ isActive: true }, { designation: 1 }).lean(),
   ]);
+
+  const activeVideoIds = videos.map((v) => v._id);
 
   // Count active videos assigned per designation ID
   const videoCountPerDesig = {};
@@ -52,9 +54,9 @@ export const buildDesignationReport = async (period = "all") => {
     empByDesig[dStr].push(emp);
   }
 
-  // Single bulk aggregation query for progress stats
+  // Single bulk aggregation query for progress stats ONLY for ACTIVE videos
   const progressAgg = await Progress.aggregate([
-    { $match: { ...df } },
+    { $match: { video: { $in: activeVideoIds }, ...df } },
     {
       $group: {
         _id: "$employee",
@@ -126,7 +128,8 @@ export const buildDesignationReport = async (period = "all") => {
       const prog = empProgressMap[eIdStr];
 
       if (prog) {
-        completedCount += prog.completedCount;
+        const cappedCompleted = Math.min(prog.completedCount, assignedVid);
+        completedCount += cappedCompleted;
         totalAttempts += prog.totalAttempts;
         if (prog.firstTryPassed) firstTryPassedCount++;
         if (prog.totalAttempts > 0 && prog.hasAnyPass === 0) atRisk++;
@@ -135,17 +138,21 @@ export const buildDesignationReport = async (period = "all") => {
       if (emp.store) {
         const sIdStr = String(emp.store);
         if (!storeEmpsMap[sIdStr]) storeEmpsMap[sIdStr] = 0;
-        if (prog) storeEmpsMap[sIdStr] += prog.completedCount;
+        if (prog) {
+          storeEmpsMap[sIdStr] += Math.min(prog.completedCount, assignedVid);
+        }
       }
     }
 
     const completionPct =
       totalPossible > 0
-        ? Math.round((completedCount / totalPossible) * 100)
+        ? Math.min(Math.round((completedCount / totalPossible) * 100), 100)
         : 0;
 
     const firstTryPct =
-      empCount > 0 ? Math.round((firstTryPassedCount / empCount) * 100) : 0;
+      empCount > 0
+        ? Math.min(Math.round((firstTryPassedCount / empCount) * 100), 100)
+        : 0;
 
     // Determine Best Store
     let bestStore = "—";
@@ -153,10 +160,13 @@ export const buildDesignationReport = async (period = "all") => {
 
     for (const [storeId, storeCompleted] of Object.entries(storeEmpsMap)) {
       const storeEmpsCount = desEmployees.filter(
-        (e) => String(e.store) === storeId
+        (e) => String(e.store) === storeId,
       ).length;
       const possible = storeEmpsCount * assignedVid;
-      const pct = possible > 0 ? Math.round((storeCompleted / possible) * 100) : 0;
+      const pct =
+        possible > 0
+          ? Math.min(Math.round((storeCompleted / possible) * 100), 100)
+          : 0;
 
       if (pct >= bestStorePct) {
         bestStorePct = pct;
@@ -182,7 +192,7 @@ export const buildDesignationReport = async (period = "all") => {
 
   // Sort by Completion % descending
   rows.sort(
-    (a, b) => parseInt(b["Completion %"]) - parseInt(a["Completion %"])
+    (a, b) => parseInt(b["Completion %"]) - parseInt(a["Completion %"]),
   );
 
   return rows;
@@ -198,10 +208,12 @@ export const buildStoreReport = async (period = "all") => {
     Store.find().lean(),
     User.find(
       { role: "Employee", isActive: true },
-      { _id: 1, store: 1, designation: 1 }
+      { _id: 1, store: 1, designation: 1 },
     ).lean(),
     Video.find({ isActive: true }, { designation: 1 }).lean(),
   ]);
+
+  const activeVideoIds = videos.map((v) => v._id);
 
   const videoCountPerDesig = {};
   for (const v of videos) {
@@ -221,8 +233,9 @@ export const buildStoreReport = async (period = "all") => {
     storeEmpMap[sStr].push(emp);
   }
 
+  // Progress aggregation ONLY for ACTIVE videos
   const progressAgg = await Progress.aggregate([
-    { $match: { ...df } },
+    { $match: { video: { $in: activeVideoIds }, ...df } },
     {
       $group: {
         _id: "$employee",
@@ -294,10 +307,11 @@ export const buildStoreReport = async (period = "all") => {
 
       const prog = empProgressMap[String(emp._id)];
       if (prog) {
-        completedCount += prog.completedCount;
+        const cappedCompleted = Math.min(prog.completedCount, assignedVideos);
+        completedCount += cappedCompleted;
         totalAttempts += prog.totalAttempts;
         if (prog.firstTryPassed) firstTryPassedCount++;
-        if (assignedVideos > 0 && prog.completedCount >= assignedVideos) {
+        if (assignedVideos > 0 && cappedCompleted >= assignedVideos) {
           atHundred++;
         }
         if (prog.totalAttempts > 0 && prog.hasAnyPass === 0) {
@@ -308,11 +322,13 @@ export const buildStoreReport = async (period = "all") => {
 
     const completionPct =
       totalPossible > 0
-        ? Math.round((completedCount / totalPossible) * 100)
+        ? Math.min(Math.round((completedCount / totalPossible) * 100), 100)
         : 0;
 
     const firstTryPct =
-      empCount > 0 ? Math.round((firstTryPassedCount / empCount) * 100) : 0;
+      empCount > 0
+        ? Math.min(Math.round((firstTryPassedCount / empCount) * 100), 100)
+        : 0;
 
     return {
       Store: store.name,
@@ -329,7 +345,7 @@ export const buildStoreReport = async (period = "all") => {
   });
 
   rows.sort(
-    (a, b) => parseInt(b["Completion %"]) - parseInt(a["Completion %"])
+    (a, b) => parseInt(b["Completion %"]) - parseInt(a["Completion %"]),
   );
 
   return rows;
