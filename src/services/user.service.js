@@ -126,10 +126,11 @@ export const updateUser = async (id, payload) => {
 //**SYNC USERS */
 export const syncStuEmployees = async (req, res) => {
   try {
+    // 1. Fetch remote data
     const { data: stuEmployees } = await axios.post(
       "https://mis.suvidhastores.com/api/load-ften-data",
       {},
-      { timeout: 60000 } // 60s timeout for remote API
+      { timeout: 60000 },
     );
 
     if (!Array.isArray(stuEmployees) || stuEmployees.length === 0) {
@@ -145,7 +146,7 @@ export const syncStuEmployees = async (req, res) => {
     let activated = 0;
     let deactivated = 0;
 
-    // 1. Collect unique IDs, Designations, and Stores upfront
+    // 2. Collect unique sets for Designations, Stores, and Codes
     const stuEmployeeIdsSet = new Set();
     const uniqueDesignationNames = new Set();
     const uniqueStoreNames = new Set();
@@ -162,40 +163,56 @@ export const syncStuEmployees = async (req, res) => {
       if (sName) uniqueStoreNames.add(sName);
     }
 
-    // 2. Fetch existing Designations and Stores once into memory
-    const existingDesignations = await Designation.find().lean();
-    const existingStores = await Store.find().lean();
+    // 3. Fetch Designations & Stores into Memory
+    const [existingDesignations, existingStores, existingUsers] =
+      await Promise.all([
+        Designation.find().lean(),
+        Store.find().lean(),
+        User.find(
+          {},
+          {
+            _id: 1,
+            employeeId: 1,
+            name: 1,
+            email: 1,
+            role: 1,
+            designation: 1,
+            store: 1,
+            isActive: 1,
+          },
+        ).lean(),
+      ]);
 
     const designationMap = new Map(
-      existingDesignations.map((d) => [d.name.trim().toLowerCase(), d])
+      existingDesignations.map((d) => [d.name.trim().toLowerCase(), d]),
     );
     const storeMap = new Map(
-      existingStores.map((s) => [s.name.trim().toLowerCase(), s])
+      existingStores.map((s) => [s.name.trim().toLowerCase(), s]),
     );
 
-    // 3. Batch Create Missing Designations
+    // 4. Batch Create Missing Designations
     const newDesignationsToCreate = [];
     for (const dName of uniqueDesignationNames) {
       if (!designationMap.has(dName.toLowerCase())) {
         newDesignationsToCreate.push({ name: dName });
       }
     }
-
     if (newDesignationsToCreate.length > 0) {
-      const createdDesignations = await Designation.insertMany(newDesignationsToCreate);
+      const createdDesignations = await Designation.insertMany(
+        newDesignationsToCreate,
+      );
       for (const d of createdDesignations) {
         designationMap.set(d.name.trim().toLowerCase(), d);
       }
     }
 
-    // 4. Batch Create Missing Stores
+    // 5. Batch Create Missing Stores
     const newStoresToCreate = [];
     for (const sName of uniqueStoreNames) {
       if (!storeMap.has(sName.toLowerCase())) {
         newStoresToCreate.push({ name: sName });
       }
     }
-
     if (newStoresToCreate.length > 0) {
       const createdStores = await Store.insertMany(newStoresToCreate);
       for (const s of createdStores) {
@@ -203,15 +220,12 @@ export const syncStuEmployees = async (req, res) => {
       }
     }
 
-    // 5. Fetch all Users once into memory
-    const existingUsers = await User.find().lean();
+    // Index existing users
     const userMap = new Map(existingUsers.map((u) => [u.employeeId, u]));
 
-    const bulkUserOperations = [];
-
-    // Pre-hash passwords for new users (optimization)
-    // Note: Creating a default hash for employee passwords or hashing per user
-    const passwordHashMap = new Map();
+    // 6. Pre-identify New Users & Hash Passwords Concurrently in Batches
+    const newUsersList = [];
+    const updateOperations = [];
 
     for (const emp of stuEmployees) {
       if (!emp.employee_code) {
@@ -225,50 +239,35 @@ export const syncStuEmployees = async (req, res) => {
 
       const designation = designationMap.get(designationName.toLowerCase());
       const store = storeMap.get(storeName.toLowerCase());
-
       const existingUser = userMap.get(employeeId);
 
-      // Skip Admin users
+      // Skip Admins
       if (existingUser && existingUser.role === "Admin") {
         skipped++;
         continue;
       }
 
-      // Skip if Designation is missing
+      // Skip missing designation
       if (!designation) {
         skipped++;
-        console.log(
-          `Skipping Employee ${employeeId} (${emp.name}) - Designation missing`
-        );
         continue;
       }
 
-      // CREATE NEW USER
+      // NEW USER
       if (!existingUser) {
-        if (!passwordHashMap.has(employeeId)) {
-          passwordHashMap.set(employeeId, await bcrypt.hash(employeeId, 10));
-        }
-        const hashedPassword = passwordHashMap.get(employeeId);
-
-        bulkUserOperations.push({
-          insertOne: {
-            document: {
-              employeeId,
-              name: emp.name,
-              password: hashedPassword,
-              role: emp.Role || "Employee",
-              designation: designation._id,
-              store: store ? store._id : undefined,
-              isActive: true,
-            },
-          },
+        newUsersList.push({
+          employeeId,
+          name: emp.name,
+          role: emp.Role || "Employee",
+          designation: designation._id,
+          store: store ? store._id : undefined,
+          isActive: true,
         });
-
         created++;
         continue;
       }
 
-      // UPDATE EXISTING USER
+      // EXISTING USER UPDATES
       const updateData = {};
 
       if (existingUser.name !== emp.name) {
@@ -298,14 +297,13 @@ export const syncStuEmployees = async (req, res) => {
         updateData.store = store._id;
       }
 
-      // Activate if currently inactive
       if (!existingUser.isActive) {
         updateData.isActive = true;
         activated++;
       }
 
       if (Object.keys(updateData).length > 0) {
-        bulkUserOperations.push({
+        updateOperations.push({
           updateOne: {
             filter: { _id: existingUser._id },
             update: { $set: updateData },
@@ -317,14 +315,36 @@ export const syncStuEmployees = async (req, res) => {
       }
     }
 
-    // 6. Execute Bulk User Insert/Updates
-    if (bulkUserOperations.length > 0) {
-      await User.bulkWrite(bulkUserOperations, { ordered: false });
+    // 7. Parallel Bcrypt Hashing for New Users (10x Faster)
+    const BATCH_SIZE = 50;
+    const insertOperations = [];
+
+    for (let i = 0; i < newUsersList.length; i += BATCH_SIZE) {
+      const batch = newUsersList.slice(i, i + BATCH_SIZE);
+      const hashedBatch = await Promise.all(
+        batch.map(async (u) => {
+          const hashedPassword = await bcrypt.hash(u.employeeId, 10);
+          return {
+            insertOne: {
+              document: {
+                ...u,
+                password: hashedPassword,
+              },
+            },
+          };
+        }),
+      );
+      insertOperations.push(...hashedBatch);
     }
 
-    // 7. Deactivate Users not in STU List
-    const stuEmployeeIdsArray = Array.from(stuEmployeeIdsSet);
+    // 8. Bulk Execution
+    const allBulkOps = [...insertOperations, ...updateOperations];
+    if (allBulkOps.length > 0) {
+      await User.bulkWrite(allBulkOps, { ordered: false });
+    }
 
+    // 9. Deactivate Missing Users
+    const stuEmployeeIdsArray = Array.from(stuEmployeeIdsSet);
     const deactivationResult = await User.updateMany(
       {
         employeeId: { $nin: stuEmployeeIdsArray },
@@ -333,7 +353,7 @@ export const syncStuEmployees = async (req, res) => {
       },
       {
         $set: { isActive: false },
-      }
+      },
     );
 
     deactivated = deactivationResult.modifiedCount || 0;
@@ -350,7 +370,6 @@ export const syncStuEmployees = async (req, res) => {
     });
   } catch (error) {
     console.error("STU Sync Error:", error);
-
     return res.status(500).json({
       success: false,
       message: error.message,

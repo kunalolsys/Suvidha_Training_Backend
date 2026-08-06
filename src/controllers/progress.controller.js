@@ -75,6 +75,20 @@ export const getMyProgress = asyncHandler(async (req, res) => {
       ),
     );
 });
+export const getEmpProgress = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const data = await progressService.getEmployeeProgressForAdminSide(id);
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        "Employee training progress tracking pulled successfully",
+        data,
+      ),
+    );
+});
 
 // 4. Fetch Official Certification Audit Record
 export const getMyCertificateData = asyncHandler(async (req, res) => {

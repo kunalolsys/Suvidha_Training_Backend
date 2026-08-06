@@ -189,7 +189,24 @@ export const getEmployeeProgress = async (userId) => {
 
   return userProgress;
 };
+export const getEmployeeProgressForAdminSide = async (userId) => {
+  const userProgress = await Progress.find({ employee: userId })
+    .populate({
+      path: "video",
+      select: "title veedUrl sortOrder duration designation isActive",
+      populate: {
+        path: "designation",
+        select: "name",
+      },
+    })
+    .populate({
+      path: "designation",
+      select: "name",
+    })
+    .sort({ createdAt: -1 });
 
+  return userProgress;
+};
 /**
  * Generate/Verify Certificate Eligibility for an Employee
  */
