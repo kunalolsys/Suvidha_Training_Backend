@@ -7,6 +7,7 @@ import {
 
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
+import { exportEmployeeTrainingProgressCSV } from "../services/dashboard.service.js";
 const router = Router();
 
 router.use(protect, authorize("Admin"));
@@ -19,5 +20,6 @@ router.get("/employee-progress", getEmployeeTrainingProgress);
 
 // GET /api/dashboard/videos-by-designation
 router.get("/videos-by-designation", getVideosByDesignation);
+router.get("/export-emp-progress", exportEmployeeTrainingProgressCSV);
 
 export default router;
