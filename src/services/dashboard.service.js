@@ -5,15 +5,10 @@ import Progress from "../models/Progress.js";
 import Designation from "../models/Designation.js";
 import Store from "../models/Store.js";
 import { Parser } from "json2csv";
-// ── Helper: pass rate from a Progress doc's history array ─────────────────
-const calcPassRate = (historyArr = []) => {
-  if (!historyArr.length) return 0;
-  const passed = historyArr.filter((h) => h.passed).length;
-  return Math.round((passed / historyArr.length) * 100);
-};
+import mongoose from "mongoose";
 
 // ─────────────────────────────────────────────────────────────────────────
-// 1. TOP STATS  (6 KPI cards on Admin Dashboard)
+// 1. TOP STATS (6 KPI cards on Admin Dashboard)
 // ─────────────────────────────────────────────────────────────────────────
 export const getDashboardStats = async () => {
   const [totalEmployees, totalVideos, totalQuestions] = await Promise.all([
@@ -22,16 +17,13 @@ export const getDashboardStats = async () => {
     Question.countDocuments(),
   ]);
 
-  // completions = Progress docs where status === "completed"
   const completions = await Progress.countDocuments({ status: "completed" });
 
-  // totalAttempts = sum of all attempts field across all Progress docs
   const attemptsAgg = await Progress.aggregate([
     { $group: { _id: null, total: { $sum: "$attempts" } } },
   ]);
   const totalAttempts = attemptsAgg[0]?.total || 0;
 
-  // avgPassRate = across all history entries
   const passRateAgg = await Progress.aggregate([
     { $unwind: "$history" },
     {
@@ -58,7 +50,7 @@ export const getDashboardStats = async () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// 2. EMPLOYEE TRAINING PROGRESS TABLE
+// 2. EMPLOYEE TRAINING PROGRESS TABLE (FIXED & MATCHED TO PROGRESS MODEL)
 // ─────────────────────────────────────────────────────────────────────────
 export const getEmployeeTrainingProgress = async ({
   page = 1,
@@ -68,77 +60,159 @@ export const getEmployeeTrainingProgress = async ({
 } = {}) => {
   const skip = (page - 1) * limit;
 
-  // Build employee filter with Name, Email, and Employee Code search
+  // 1. Build Filter
   const empFilter = { role: "Employee", isActive: true };
   if (storeId) empFilter.store = storeId;
   if (search) {
     empFilter.$or = [
       { name: { $regex: search, $options: "i" } },
-      // { email: { $regex: search, $options: "i" } },
-      { employeeId: { $regex: search, $options: "i" } }, // 👈 Added Employee Code search
+      { employeeId: { $regex: search, $options: "i" } },
     ];
   }
 
+  // 2. Fetch paginated employees
   const [employees, total] = await Promise.all([
     User.find(empFilter)
       .populate("designation", "name")
-      .populate("store", "name employeeId")
+      .populate("store", "name employeeId code")
       .skip(skip)
       .limit(limit)
       .lean(),
     User.countDocuments(empFilter),
   ]);
 
-  const rows = await Promise.all(
-    employees.map(async (emp) => {
-      // Total videos assigned to this employee's designation
-      const totalVideos = await Video.countDocuments({
-        designation: emp.designation?._id,
-        isActive: true,
-      });
+  if (!employees.length) {
+    return {
+      data: [],
+      pagination: { total: 0, page, limit, totalPages: 0 },
+    };
+  }
 
-      // Progress records for this employee
-      const progressDocs = await Progress.find({ employee: emp._id }).lean();
+  const employeeIds = employees.map((emp) => emp._id);
+  const designationIds = [
+    ...new Set(
+      employees
+        .map((emp) => emp.designation?._id)
+        .filter((id) => id != null)
+    ),
+  ];
 
-      const completedCount = progressDocs.filter(
-        (p) => p.status === "completed",
-      ).length;
+  // 3. Parallel Aggregation Queries
+  const [videoStatsByDesignation, progressByEmployee] = await Promise.all([
+    // A) Get Total Videos & Total Questions assigned to each Designation
+    Video.aggregate([
+      { $match: { designation: { $in: designationIds }, isActive: true } },
+      {
+        $lookup: {
+          from: "questions",
+          localField: "_id",
+          foreignField: "video",
+          as: "questions",
+        },
+      },
+      {
+        $group: {
+          _id: "$designation",
+          totalVideos: { $sum: 1 },
+          totalQuestions: { $sum: { $size: "$questions" } }, // Total Questions e.g. 11
+        },
+      },
+    ]),
 
-      // Total attempts = sum of .attempts across all their Progress docs
-      const totalAttempts = progressDocs.reduce(
-        (sum, p) => sum + (p.attempts || 0),
-        0,
-      );
+    // B) Fetch Employee's Progress Docs with Attempt History & Snapshots
+    Progress.find({ employee: { $in: employeeIds } })
+      .select("employee video status attempts history")
+      .lean(),
+  ]);
 
-      // Pass rate: across all history entries for this employee
-      const allHistory = progressDocs.flatMap((p) => p.history || []);
-      const passRate = calcPassRate(allHistory);
-
-      return {
-        _id: emp._id,
-        name: emp.name,
-        code: emp.employeeId || "—", // 👈 Included Employee Code
-        email: emp.email,
-        store: emp.store?.name || "—",
-        storeCode: emp.store?.code || "—",
-        designation: emp.designation?.name || "—",
-        videos: totalVideos,
-        completed: `${completedCount}/${totalVideos}`,
-        completedCount,
-        attempts: totalAttempts,
-        passRate: `${passRate}%`,
-        passRateNum: passRate,
-      };
-    }),
+  // 4. Create Fast Lookup Maps
+  const desgStatsMap = new Map(
+    videoStatsByDesignation.map((v) => [
+      String(v._id),
+      { totalVideos: v.totalVideos || 0, totalQuestions: v.totalQuestions || 0 },
+    ])
   );
+
+  // Group progress docs by employee ID
+  const progressMap = new Map();
+  progressByEmployee.forEach((p) => {
+    const empKey = String(p.employee);
+    if (!progressMap.has(empKey)) {
+      progressMap.set(empKey, []);
+    }
+    progressMap.get(empKey).push(p);
+  });
+
+  // 5. Construct Result Rows
+  const rows = employees.map((emp) => {
+    const desgId = emp.designation?._id ? String(emp.designation._id) : null;
+    const empId = String(emp._id);
+
+    const desgStats = desgId
+      ? desgStatsMap.get(desgId) || { totalVideos: 0, totalQuestions: 0 }
+      : { totalVideos: 0, totalQuestions: 0 };
+
+    const userProgressList = progressMap.get(empId) || [];
+
+    let completedCount = 0;
+    let totalAttempts = 0;
+    const correctQuestionIds = new Set();
+
+    userProgressList.forEach((pDoc) => {
+      if (pDoc.status === "completed") completedCount++;
+      totalAttempts += pDoc.attempts || 0;
+
+      // Scan history snapshots for correct questions
+      (pDoc.history || []).forEach((attempt) => {
+        (attempt.snapshot || []).forEach((qSnap) => {
+          if (qSnap.isCorrect && qSnap.questionId) {
+            correctQuestionIds.add(String(qSnap.questionId));
+          }
+        });
+      });
+    });
+
+    const totalQuestions = desgStats.totalQuestions; // e.g. 11
+    const passedQuestions = correctQuestionIds.size; // e.g. 6
+
+    // Pass Rate Calculation: (6 / 11) * 100 = 55%
+    const passRateNum =
+      totalQuestions > 0
+        ? Math.min(100, Math.round((passedQuestions / totalQuestions) * 100))
+        : 0;
+
+    return {
+      _id: emp._id,
+      name: emp.name,
+      code: emp.employeeId || "—",
+      email: emp.email,
+      store: emp.store?.name || "—",
+      storeCode: emp.store?.code || "—",
+      designation: emp.designation?.name || "—",
+      videos: desgStats.totalVideos,
+      totalQuestions: totalQuestions,
+      passedQuestions: passedQuestions,
+      completed: `${completedCount}/${desgStats.totalVideos}`,
+      completedCount,
+      attempts: totalAttempts,
+      passRate: `${passRateNum}%`,
+      passRateNum: passRateNum,
+    };
+  });
 
   return {
     data: rows,
-    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    },
   };
 };
+
 // ─────────────────────────────────────────────────────────────────────────
-// 3. VIDEOS BY DESIGNATION  (Screen 2 grid cards)
+// 3. VIDEOS BY DESIGNATION (Screen 2 grid cards)
 // ─────────────────────────────────────────────────────────────────────────
 export const getVideosByDesignation = async () => {
   const designations = await Designation.find().lean();
@@ -156,7 +230,7 @@ export const getVideosByDesignation = async () => {
 
       const sampleVideos = await Video.find(
         { designation: des._id, isActive: true },
-        { title: 1, duration: 1, videoId: 1 },
+        { title: 1, duration: 1, videoId: 1 }
       )
         .limit(5)
         .lean();
@@ -168,106 +242,127 @@ export const getVideosByDesignation = async () => {
         employees: employeeCount,
         sampleVideos,
       };
-    }),
+    })
   );
 
-  // Sort by designation name alphabetically
   result.sort((a, b) => a.designation.localeCompare(b.designation));
   return result;
 };
+
 // ─────────────────────────────────────────────────────────────────────────
-// 4.EXPORT EMPLOYEE TRAINING PROGRESS TABLE
+// 4. EXPORT EMPLOYEE TRAINING PROGRESS TABLE (CSV)
 // ─────────────────────────────────────────────────────────────────────────
 export const exportEmployeeTrainingProgressCSV = async (req, res) => {
   try {
     const { search = "", storeId = "" } = req.query;
 
-    // 1. Build employee filter with Name, Email, and Employee Code search
     const empFilter = { role: "Employee", isActive: true };
     if (storeId) empFilter.store = new mongoose.Types.ObjectId(storeId);
     if (search) {
       empFilter.$or = [
         { name: { $regex: search, $options: "i" } },
-        // { email: { $regex: search, $options: "i" } },
-        { employeeId: { $regex: search, $options: "i" } }, // 👈 Added Employee Code search
+        { employeeId: { $regex: search, $options: "i" } },
       ];
     }
 
-    // 2. Fetch all matching employees in parallel with pre-calculated aggregations
-    const [employees, videoCountsByDesignation, progressByEmployee] =
+    const [employees, videoStatsByDesignation, progressDocs] =
       await Promise.all([
-        // Query 1: Fetch searched/filtered employees
         User.find(empFilter)
           .populate("designation", "name")
-          .populate("store", "name employeeId")
-          .select("name employeeId designation store") // 👈 Included 'code'
+          .populate("store", "name employeeId code")
+          .select("name employeeId designation store")
           .lean(),
 
-        // Query 2: Aggregate total active videos grouped by designation
         Video.aggregate([
           { $match: { isActive: true } },
-          { $group: { _id: "$designation", totalVideos: { $sum: 1 } } },
-        ]),
-
-        // Query 3: Aggregate completed count, total attempts, and history by employee
-        Progress.aggregate([
+          {
+            $lookup: {
+              from: "questions",
+              localField: "_id",
+              foreignField: "video",
+              as: "questions",
+            },
+          },
           {
             $group: {
-              _id: "$employee",
-              completedCount: {
-                $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-              },
-              totalAttempts: { $sum: "$attempts" },
-              allHistory: { $push: "$history" },
+              _id: "$designation",
+              totalVideos: { $sum: 1 },
+              totalQuestions: { $sum: { $size: "$questions" } },
             },
           },
         ]),
+
+        Progress.find()
+          .select("employee status attempts history")
+          .lean(),
       ]);
 
-    // 3. Create fast O(1) Lookup Maps
-    const videoCountMap = new Map(
-      videoCountsByDesignation.map((v) => [String(v._id), v.totalVideos]),
+    const desgStatsMap = new Map(
+      videoStatsByDesignation.map((v) => [
+        String(v._id),
+        { totalVideos: v.totalVideos || 0, totalQuestions: v.totalQuestions || 0 },
+      ])
     );
 
-    const progressMap = new Map(
-      progressByEmployee.map((p) => [
-        String(p._id),
-        {
-          completedCount: p.completedCount || 0,
-          totalAttempts: p.totalAttempts || 0,
-          history: (p.allHistory || []).flat(2).filter(Boolean),
-        },
-      ]),
-    );
+    const progressMap = new Map();
+    progressDocs.forEach((p) => {
+      const empKey = String(p.employee);
+      if (!progressMap.has(empKey)) {
+        progressMap.set(empKey, []);
+      }
+      progressMap.get(empKey).push(p);
+    });
 
-    // 4. Map rows in memory (0 extra DB calls)
     const rows = employees.map((emp) => {
       const desgId = emp.designation?._id ? String(emp.designation._id) : null;
       const empId = String(emp._id);
 
-      const totalVideos = desgId ? videoCountMap.get(desgId) || 0 : 0;
-      const empProgress = progressMap.get(empId) || {
-        completedCount: 0,
-        totalAttempts: 0,
-        history: [],
-      };
+      const desgStats = desgId
+        ? desgStatsMap.get(desgId) || { totalVideos: 0, totalQuestions: 0 }
+        : { totalVideos: 0, totalQuestions: 0 };
 
-      const passRate = calcPassRate(empProgress.history);
+      const userProgressList = progressMap.get(empId) || [];
+
+      let completedCount = 0;
+      let totalAttempts = 0;
+      const correctQuestionIds = new Set();
+
+      userProgressList.forEach((pDoc) => {
+        if (pDoc.status === "completed") completedCount++;
+        totalAttempts += pDoc.attempts || 0;
+
+        (pDoc.history || []).forEach((attempt) => {
+          (attempt.snapshot || []).forEach((qSnap) => {
+            if (qSnap.isCorrect && qSnap.questionId) {
+              correctQuestionIds.add(String(qSnap.questionId));
+            }
+          });
+        });
+      });
+
+      const totalQuestions = desgStats.totalQuestions;
+      const passedQuestions = correctQuestionIds.size;
+
+      const passRateNum =
+        totalQuestions > 0
+          ? Math.min(100, Math.round((passedQuestions / totalQuestions) * 100))
+          : 0;
 
       return {
-        "Employee Code": emp.employeeId || "", // 👈 Added to CSV columns
+        "Employee Code": emp.employeeId || "",
         "Employee Name": emp.name || "",
         Store: emp.store?.name || "",
         "Store Code": emp.store?.code || "",
         Designation: emp.designation?.name || "",
-        "Total Videos Assigned": totalVideos,
-        "Videos Completed": empProgress.completedCount,
-        "Total Attempts": empProgress.totalAttempts,
-        "Pass Rate (%)": `${passRate}%`,
+        "Total Videos Assigned": desgStats.totalVideos,
+        "Total Questions": totalQuestions,
+        "Questions Passed": passedQuestions,
+        "Videos Completed": completedCount,
+        "Total Attempts": totalAttempts,
+        "Pass Rate (%)": `${passRateNum}%`,
       };
     });
 
-    // 5. Generate CSV Output
     const fields = [
       "Employee Code",
       "Employee Name",
@@ -275,6 +370,8 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
       "Store Code",
       "Designation",
       "Total Videos Assigned",
+      "Total Questions",
+      "Questions Passed",
       "Videos Completed",
       "Total Attempts",
       "Pass Rate (%)",
@@ -286,7 +383,7 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=employee_training_progress_${Date.now()}.csv`,
+      `attachment; filename=employee_training_progress_${Date.now()}.csv`
     );
 
     return res.status(200).send(csv);
