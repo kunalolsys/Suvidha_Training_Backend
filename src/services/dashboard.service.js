@@ -43,7 +43,9 @@ export const getDashboardStats = async () => {
   ]);
   const avgPassRate =
     passRateAgg[0]?.total > 0
-      ? Number(((passRateAgg[0].passed / passRateAgg[0].total) * 100).toFixed(2))
+      ? Number(
+          ((passRateAgg[0].passed / passRateAgg[0].total) * 100).toFixed(2),
+        )
       : 0;
 
   return {
@@ -101,13 +103,12 @@ export const getEmployeeTrainingProgress = async ({
       employees
         .map((emp) => emp.designation?._id)
         .filter((id) => id != null)
-        .map(String)
+        .map(String),
     ),
   ].map((id) => new mongoose.Types.ObjectId(id));
 
   // 3. Parallel Database Queries
   const [videoStatsByDesignation, progressDocs] = await Promise.all([
-    // Videos group by Designation array
     Video.aggregate([
       { $match: { designation: { $in: designationIds }, isActive: true } },
       { $unwind: "$designation" },
@@ -129,7 +130,6 @@ export const getEmployeeTrainingProgress = async ({
       },
     ]),
 
-    // Fetch progress docs for matched employees
     Progress.find({ employee: { $in: employeeIds } })
       .select("employee video status attempts history")
       .lean(),
@@ -139,8 +139,11 @@ export const getEmployeeTrainingProgress = async ({
   const desgStatsMap = new Map(
     videoStatsByDesignation.map((v) => [
       String(v._id),
-      { totalVideos: v.totalVideos || 0, totalQuestions: v.totalQuestions || 0 },
-    ])
+      {
+        totalVideos: v.totalVideos || 0,
+        totalQuestions: v.totalQuestions || 0,
+      },
+    ]),
   );
 
   const progressMap = new Map();
@@ -166,59 +169,56 @@ export const getEmployeeTrainingProgress = async ({
     let completedCount = 0;
     let totalAttempts = 0;
     let totalCorrectQuestions = 0;
-    let historyTotalQuestionsSum = 0;
+    let totalAttemptedQuestions = 0;
 
     userProgressList.forEach((pDoc) => {
       if (pDoc.status === "completed") completedCount++;
       totalAttempts += pDoc.attempts || 0;
 
-      // Extract best attempt score for each video
-      let bestAttemptCorrect = 0;
-      let videoQuestionCount = 0;
+      const history = pDoc.history || [];
+      if (history.length > 0) {
+        // Pick the latest attempt from history array
+        const latestAttempt = history[history.length - 1];
 
-      (pDoc.history || []).forEach((attempt) => {
-        let attemptCorrect = 0;
-        let attemptTotalQ = attempt.totalQuestions || 0;
+        let latestCorrect = 0;
+        let latestTotalQ = latestAttempt.totalQuestions || 0;
 
-        // Mode 1: Snapshot items
-        if (attempt.snapshot && attempt.snapshot.length > 0) {
-          attemptTotalQ = attempt.snapshot.length;
-          attemptCorrect = attempt.snapshot.filter((q) => q.isCorrect).length;
-        } 
+        // Mode 1: Evaluate using snapshot array
+        if (latestAttempt.snapshot && latestAttempt.snapshot.length > 0) {
+          latestTotalQ = latestAttempt.snapshot.length;
+          latestCorrect = latestAttempt.snapshot.filter(
+            (q) => q.isCorrect,
+          ).length;
+        }
         // Mode 2: Score field fallback
-        else if (attempt.score !== undefined && attempt.score !== null) {
-          if (attempt.score <= attemptTotalQ) {
-            attemptCorrect = attempt.score;
+        else if (
+          latestAttempt.score !== undefined &&
+          latestAttempt.score !== null
+        ) {
+          if (latestAttempt.score <= latestTotalQ) {
+            latestCorrect = latestAttempt.score;
           } else {
-            // If score is recorded in percentage (e.g. 100 or 20)
-            attemptCorrect = Math.round((attempt.score / 100) * attemptTotalQ);
+            latestCorrect = Math.round(
+              (latestAttempt.score / 100) * latestTotalQ,
+            );
           }
         }
 
-        if (attemptCorrect > bestAttemptCorrect) {
-          bestAttemptCorrect = attemptCorrect;
-        }
-        if (attemptTotalQ > videoQuestionCount) {
-          videoQuestionCount = attemptTotalQ;
-        }
-      });
-
-      totalCorrectQuestions += bestAttemptCorrect;
-      historyTotalQuestionsSum += videoQuestionCount;
+        totalCorrectQuestions += latestCorrect;
+        totalAttemptedQuestions += latestTotalQ;
+      }
     });
-
-    // Total questions fallback if designation mapping is empty
-    const totalQuestions =
-      desgStats.totalQuestions > 0
-        ? desgStats.totalQuestions
-        : historyTotalQuestionsSum;
 
     const totalVideosAssigned =
       desgStats.totalVideos > 0
         ? desgStats.totalVideos
         : userProgressList.length;
 
-    const passRateNum = calcPassRate(totalCorrectQuestions, totalQuestions);
+    // Pass rate based on total correct vs total attempted questions
+    const passRateNum = calcPassRate(
+      totalCorrectQuestions,
+      totalAttemptedQuestions,
+    );
 
     return {
       _id: emp._id,
@@ -229,7 +229,7 @@ export const getEmployeeTrainingProgress = async ({
       storeCode: emp.store?.code || "—",
       designation: emp.designation?.name || "—",
       videos: totalVideosAssigned,
-      totalQuestions: totalQuestions,
+      totalQuestions: totalAttemptedQuestions,
       passedQuestions: totalCorrectQuestions,
       completed: `${completedCount}/${totalVideosAssigned}`,
       completedCount,
@@ -269,7 +269,7 @@ export const getVideosByDesignation = async () => {
 
       const sampleVideos = await Video.find(
         { designation: des._id, isActive: true },
-        { title: 1, duration: 1, videoId: 1 }
+        { title: 1, duration: 1, videoId: 1 },
       )
         .limit(5)
         .lean();
@@ -281,7 +281,7 @@ export const getVideosByDesignation = async () => {
         employees: employeeCount,
         sampleVideos,
       };
-    })
+    }),
   );
 
   result.sort((a, b) => a.designation.localeCompare(b.designation));
@@ -289,7 +289,7 @@ export const getVideosByDesignation = async () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. EXPORT EMPLOYEE TRAINING PROGRESS TABLE
+// EXPORT EMPLOYEE TRAINING PROGRESS TABLE (LATEST ATTEMPT BASED EVALUATION)
 // ─────────────────────────────────────────────────────────────────────────────
 export const exportEmployeeTrainingProgressCSV = async (req, res) => {
   try {
@@ -332,16 +332,17 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
           },
         ]),
 
-        Progress.find()
-          .select("employee status attempts history")
-          .lean(),
+        Progress.find().select("employee status attempts history").lean(),
       ]);
 
     const desgStatsMap = new Map(
       videoStatsByDesignation.map((v) => [
         String(v._id),
-        { totalVideos: v.totalVideos || 0, totalQuestions: v.totalQuestions || 0 },
-      ])
+        {
+          totalVideos: v.totalVideos || 0,
+          totalQuestions: v.totalQuestions || 0,
+        },
+      ]),
     );
 
     const progressMap = new Map();
@@ -366,53 +367,56 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
       let completedCount = 0;
       let totalAttempts = 0;
       let totalCorrectQuestions = 0;
-      let historyTotalQuestionsSum = 0;
+      let totalAttemptedQuestions = 0;
 
       userProgressList.forEach((pDoc) => {
         if (pDoc.status === "completed") completedCount++;
         totalAttempts += pDoc.attempts || 0;
 
-        let bestAttemptCorrect = 0;
-        let videoQuestionCount = 0;
+        const history = pDoc.history || [];
+        if (history.length > 0) {
+          // 1. Always target the LATEST attempt from history array
+          const latestAttempt = history[history.length - 1];
 
-        (pDoc.history || []).forEach((attempt) => {
-          let attemptCorrect = 0;
-          let attemptTotalQ = attempt.totalQuestions || 0;
+          let latestCorrect = 0;
+          let latestTotalQ = latestAttempt.totalQuestions || 0;
 
-          if (attempt.snapshot && attempt.snapshot.length > 0) {
-            attemptTotalQ = attempt.snapshot.length;
-            attemptCorrect = attempt.snapshot.filter((q) => q.isCorrect).length;
-          } else if (attempt.score !== undefined && attempt.score !== null) {
-            if (attempt.score <= attemptTotalQ) {
-              attemptCorrect = attempt.score;
+          // Mode 1: Evaluate using snapshot array
+          if (latestAttempt.snapshot && latestAttempt.snapshot.length > 0) {
+            latestTotalQ = latestAttempt.snapshot.length;
+            latestCorrect = latestAttempt.snapshot.filter(
+              (q) => q.isCorrect,
+            ).length;
+          }
+          // Mode 2: Score field fallback
+          else if (
+            latestAttempt.score !== undefined &&
+            latestAttempt.score !== null
+          ) {
+            if (latestAttempt.score <= latestTotalQ) {
+              latestCorrect = latestAttempt.score;
             } else {
-              attemptCorrect = Math.round((attempt.score / 100) * attemptTotalQ);
+              latestCorrect = Math.round(
+                (latestAttempt.score / 100) * latestTotalQ,
+              );
             }
           }
 
-          if (attemptCorrect > bestAttemptCorrect) {
-            bestAttemptCorrect = attemptCorrect;
-          }
-          if (attemptTotalQ > videoQuestionCount) {
-            videoQuestionCount = attemptTotalQ;
-          }
-        });
-
-        totalCorrectQuestions += bestAttemptCorrect;
-        historyTotalQuestionsSum += videoQuestionCount;
+          totalCorrectQuestions += latestCorrect;
+          totalAttemptedQuestions += latestTotalQ;
+        }
       });
-
-      const totalQuestions =
-        desgStats.totalQuestions > 0
-          ? desgStats.totalQuestions
-          : historyTotalQuestionsSum;
 
       const totalVideosAssigned =
         desgStats.totalVideos > 0
           ? desgStats.totalVideos
           : userProgressList.length;
 
-      const passRateNum = calcPassRate(totalCorrectQuestions, totalQuestions);
+      // Pass rate based on latest attempt correct answers vs latest attempt total questions
+      const passRateNum = calcPassRate(
+        totalCorrectQuestions,
+        totalAttemptedQuestions,
+      );
 
       return {
         "Employee Code": emp.employeeId || "",
@@ -421,7 +425,7 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
         "Store Code": emp.store?.code || "",
         Designation: emp.designation?.name || "",
         "Total Videos Assigned": totalVideosAssigned,
-        "Total Questions": totalQuestions,
+        "Total Questions": totalAttemptedQuestions,
         "Questions Passed": totalCorrectQuestions,
         "Videos Completed": completedCount,
         "Total Attempts": totalAttempts,
@@ -449,7 +453,7 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=employee_training_progress_${Date.now()}.csv`
+      `attachment; filename=employee_training_progress_${Date.now()}.csv`,
     );
 
     return res.status(200).send(csv);
