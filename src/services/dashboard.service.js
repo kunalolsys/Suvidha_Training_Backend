@@ -466,3 +466,153 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
     });
   }
 };
+
+
+//**Videos by designation helper functions */
+// Helper: Convert "MM:SS" or "HH:MM:SS" to total seconds
+const parseDurationToSeconds = (durationStr) => {
+  if (!durationStr || typeof durationStr !== "string") return 0;
+  const parts = durationStr.split(":").map(Number);
+  if (parts.some(isNaN)) return 0;
+
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  } else if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  return Number(durationStr) || 0;
+};
+
+// Helper: Convert seconds back to HH:MM:SS format
+const formatSecondsToTime = (totalSeconds) => {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  const pad = (num) => String(num).padStart(2, "0");
+  if (hours > 0) {
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  }
+  return `${pad(minutes)}:${pad(seconds)}`;
+};
+
+export const exportVideosByDesignationReportCSV = async (req, res) => {
+  try {
+    const { search = "" } = req.query;
+
+    const desgFilter = {};
+    if (search) {
+      desgFilter.name = { $regex: search, $options: "i" };
+    }
+
+    const [designations, videosByDesignation, employeeCounts] = await Promise.all([
+      // 1. Fetch Designations
+      Designation.find(desgFilter).sort({ name: 1 }).lean(),
+
+      // 2. Fetch Active Videos mapped with Questions
+      Video.aggregate([
+        { $match: { isActive: true } },
+        { $unwind: "$designation" },
+        {
+          $lookup: {
+            from: "questions",
+            localField: "_id",
+            foreignField: "video",
+            as: "questions",
+          },
+        },
+        {
+          $project: {
+            designation: 1,
+            videoId: 1,
+            title: 1,
+            duration: 1,
+            sortOrder: 1,
+            questionCount: { $size: "$questions" },
+          },
+        },
+        { $sort: { sortOrder: 1 } },
+      ]),
+
+      // 3. Count Active Employees per Designation
+      User.aggregate([
+        { $match: { role: "Employee", isActive: true } },
+        {
+          $group: {
+            _id: "$designation",
+            activeEmployees: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    // Map Active Employees count by Designation ID
+    const empCountMap = new Map(
+      employeeCounts.map((e) => [String(e._id), e.activeEmployees])
+    );
+
+    // Group Videos by Designation ID
+    const videosMap = new Map();
+    videosByDesignation.forEach((vid) => {
+      const desgId = String(vid.designation);
+      if (!videosMap.has(desgId)) {
+        videosMap.set(desgId, []);
+      }
+      videosMap.get(desgId).push(vid);
+    });
+
+    // Build Rows for CSV
+    const rows = designations.map((desg) => {
+      const desgId = String(desg._id);
+      const desgVideos = videosMap.get(desgId) || [];
+      const totalEmployees = empCountMap.get(desgId) || 0;
+
+      let totalDurationInSeconds = 0;
+      let totalQuestions = 0;
+
+      const videoTitlesList = desgVideos
+        .map((v) => {
+          totalDurationInSeconds += parseDurationToSeconds(v.duration);
+          totalQuestions += v.questionCount || 0;
+          return `[${v.videoId || "N/A"}] ${v.title}`;
+        })
+        .join(" | ");
+
+      return {
+        "Designation Name": desg.name || "N/A",
+        "Active Employees": totalEmployees,
+        "Total Training Videos": desgVideos.length,
+        "Total Questions": totalQuestions,
+        // "Total Training Duration": formatSecondsToTime(totalDurationInSeconds),
+        "Video Titles": videoTitlesList || "No videos assigned",
+      };
+    });
+
+    const fields = [
+      "Designation Name",
+      "Active Employees",
+      "Total Training Videos",
+      "Total Questions",
+      // "Total Training Duration",
+      "Video Titles",
+    ];
+
+    const json2csvParser = new Parser({ fields });
+    const csv = json2csvParser.parse(rows);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=videos_by_designation_report_${Date.now()}.csv`
+    );
+
+    return res.status(200).send(csv);
+  } catch (error) {
+    console.error("Videos by Designation CSV Export Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to export Videos by Designation CSV report",
+      error: error.message,
+    });
+  }
+};

@@ -115,7 +115,7 @@ export const submitQuizAttempt = async (userId, videoId, userAnswers) => {
 
   const totalQuestions = liveQuestions.length;
   const score = Math.round((correctCount / totalQuestions) * 100);
-  const PASS_THRESHOLD = 60; // Pass mark percentage
+  const PASS_THRESHOLD = 70; // Pass mark percentage
   const passed = score >= PASS_THRESHOLD;
 
   // Retrieve or initialize user progress
