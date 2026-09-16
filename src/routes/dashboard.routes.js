@@ -7,7 +7,7 @@ import {
 
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
-import { exportEmployeeTrainingProgressCSV,exportVideosByDesignationReportCSV } from "../services/dashboard.service.js";
+import { exportEmployeeTrainingProgressCSV,exportVideosByDesignationReportCSV, exportVideosCSV } from "../services/dashboard.service.js";
 const router = Router();
 
 router.use(protect, authorize("Admin"));
@@ -22,5 +22,6 @@ router.get("/employee-progress", getEmployeeTrainingProgress);
 router.get("/videos-by-designation", getVideosByDesignation);
 router.get("/export-emp-progress", exportEmployeeTrainingProgressCSV);
 router.get("/export-videos-by-designation", exportVideosByDesignationReportCSV);
+router.get("/export-videos", exportVideosCSV);
 
 export default router;

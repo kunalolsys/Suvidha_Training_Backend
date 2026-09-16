@@ -467,7 +467,6 @@ export const exportEmployeeTrainingProgressCSV = async (req, res) => {
   }
 };
 
-
 //**Videos by designation helper functions */
 // Helper: Convert "MM:SS" or "HH:MM:SS" to total seconds
 const parseDurationToSeconds = (durationStr) => {
@@ -505,50 +504,51 @@ export const exportVideosByDesignationReportCSV = async (req, res) => {
       desgFilter.name = { $regex: search, $options: "i" };
     }
 
-    const [designations, videosByDesignation, employeeCounts] = await Promise.all([
-      // 1. Fetch Designations
-      Designation.find(desgFilter).sort({ name: 1 }).lean(),
+    const [designations, videosByDesignation, employeeCounts] =
+      await Promise.all([
+        // 1. Fetch Designations
+        Designation.find(desgFilter).sort({ name: 1 }).lean(),
 
-      // 2. Fetch Active Videos mapped with Questions
-      Video.aggregate([
-        { $match: { isActive: true } },
-        { $unwind: "$designation" },
-        {
-          $lookup: {
-            from: "questions",
-            localField: "_id",
-            foreignField: "video",
-            as: "questions",
+        // 2. Fetch Active Videos mapped with Questions
+        Video.aggregate([
+          { $match: { isActive: true } },
+          { $unwind: "$designation" },
+          {
+            $lookup: {
+              from: "questions",
+              localField: "_id",
+              foreignField: "video",
+              as: "questions",
+            },
           },
-        },
-        {
-          $project: {
-            designation: 1,
-            videoId: 1,
-            title: 1,
-            duration: 1,
-            sortOrder: 1,
-            questionCount: { $size: "$questions" },
+          {
+            $project: {
+              designation: 1,
+              videoId: 1,
+              title: 1,
+              duration: 1,
+              sortOrder: 1,
+              questionCount: { $size: "$questions" },
+            },
           },
-        },
-        { $sort: { sortOrder: 1 } },
-      ]),
+          { $sort: { sortOrder: 1 } },
+        ]),
 
-      // 3. Count Active Employees per Designation
-      User.aggregate([
-        { $match: { role: "Employee", isActive: true } },
-        {
-          $group: {
-            _id: "$designation",
-            activeEmployees: { $sum: 1 },
+        // 3. Count Active Employees per Designation
+        User.aggregate([
+          { $match: { role: "Employee", isActive: true } },
+          {
+            $group: {
+              _id: "$designation",
+              activeEmployees: { $sum: 1 },
+            },
           },
-        },
-      ]),
-    ]);
+        ]),
+      ]);
 
     // Map Active Employees count by Designation ID
     const empCountMap = new Map(
-      employeeCounts.map((e) => [String(e._id), e.activeEmployees])
+      employeeCounts.map((e) => [String(e._id), e.activeEmployees]),
     );
 
     // Group Videos by Designation ID
@@ -603,7 +603,7 @@ export const exportVideosByDesignationReportCSV = async (req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=videos_by_designation_report_${Date.now()}.csv`
+      `attachment; filename=videos_by_designation_report_${Date.now()}.csv`,
     );
 
     return res.status(200).send(csv);
@@ -612,6 +612,94 @@ export const exportVideosByDesignationReportCSV = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to export Videos by Designation CSV report",
+      error: error.message,
+    });
+  }
+};
+
+export const exportVideosCSV = async (req, res) => {
+  try {
+    const { search = "", designation = "", isActive } = req.query;
+
+    // 1. Build Query Filter
+    const filter = { isActive: true };
+
+    if (search) {
+      filter.title = { $regex: search.trim(), $options: "i" };
+    }
+
+    // if (isActive !== undefined && isActive !== "") {
+    //   filter.isActive = String(isActive) === "true";
+    // }
+
+    if (designation) {
+      const designationIds = Array.isArray(designation)
+        ? designation
+        : designation.split(",").map((d) => d.trim());
+      filter.designation = { $in: designationIds };
+    }
+
+    // 2. Fetch Videos with Designation Populate
+    const videos = await Video.find(filter)
+      .populate("designation", "name title")
+      .sort({ sortOrder: 1, createdAt: -1 })
+      .lean();
+
+    // 3. Map Rows for CSV
+    const rows = videos.map((video, index) => {
+      const designationNames = Array.isArray(video.designation)
+        ? video.designation
+            .map((d) => d?.name || d?.title || "")
+            .filter(Boolean)
+            .join(" | ")
+        : "-";
+
+      return {
+        "Sr. No.": index + 1,
+        "Video ID": video.videoId || "N/A",
+        Title: video.title || "N/A",
+        // Duration: video.duration || "-",
+        "Veed URL": video.veedUrl || "-",
+        "Vimeo ID": video.vimeoId || "-",
+        Designations: designationNames || "All",
+        "Sort Order": video.sortOrder ?? 1,
+        // Status: video.isActive ? "Active" : "Inactive",
+        "Created At": video.createdAt
+          ? new Date(video.createdAt).toISOString().split("T")[0]
+          : "-",
+      };
+    });
+
+    // 4. Define CSV Header Fields
+    const fields = [
+      "Sr. No.",
+      "Video ID",
+      "Title",
+      // "Duration",
+      "Veed URL",
+      "Vimeo ID",
+      "Designations",
+      "Sort Order",
+      // "Status",
+      "Created At",
+    ];
+
+    // 5. Parse JSON to CSV & Send Response
+    const json2csvParser = new Parser({ fields });
+    const csv = json2csvParser.parse(rows);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=videos_export_${Date.now()}.csv`,
+    );
+
+    return res.status(200).send(csv);
+  } catch (error) {
+    console.error("Videos CSV Export Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to export Videos CSV report",
       error: error.message,
     });
   }
